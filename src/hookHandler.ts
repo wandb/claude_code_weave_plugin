@@ -17,6 +17,7 @@ import type {
   StopHookInput,
   SubagentStartHookInput,
   SubagentStopHookInput,
+  TeammateIdleHookInput,
   UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import * as weave from 'weave';
@@ -48,6 +49,7 @@ import { ATTR, assistantOutputMessages, snippet } from './genaiSpans.js';
 import type { SpanParent } from './genaiSpans.js';
 import { parseSessionFd } from './parser.js';
 import { Session } from './session.js';
+import { TeamCoordinator } from './teamCoordinator.js';
 import {
   TranscriptFile,
   readSubagentPrompt,
@@ -118,9 +120,11 @@ function parseHookInput(payload: unknown): HookInput | undefined {
 
 export class HookHandler {
   private readonly sessions = new Map<string, Session>();
-  private readonly sessionQueues = new Map<string, Promise<void>>();
+  private eventQueue = Promise.resolve();
+  private eventSequence = 0;
   /** InstructionsLoaded can arrive before SessionStart. */
   private readonly pendingInstructions = new Map<string, Map<string, string>>();
+  private readonly teams = new TeamCoordinator();
 
   constructor(
     private readonly agentName: string,
@@ -134,33 +138,26 @@ export class HookHandler {
       return;
     }
 
-    const sessionId = input.session_id;
-    const previous = this.sessionQueues.get(sessionId) ?? Promise.resolve();
-    const next = previous.then(() => this.route(input));
-    this.sessionQueues.set(sessionId, next);
-    try {
-      await next;
-    } finally {
-      if (this.sessionQueues.get(sessionId) === next) {
-        this.sessionQueues.delete(sessionId);
-      }
-    }
+    const sequence = ++this.eventSequence;
+    const next = this.eventQueue.then(() => this.route(input, sequence));
+    this.eventQueue = next;
+    await next;
   }
 
-  private async route(input: HookInput): Promise<void> {
+  private async route(input: HookInput, sequence: number): Promise<void> {
     const sessionId = input.session_id;
     this.log(
       'INFO',
       `${input.hook_event_name} session=${sessionId}${input.agent_id ? ` agent=${input.agent_id}` : ''}`,
     );
     try {
-      await weave.runIsolated(() => this.dispatchEvent(input));
+      await weave.runIsolated(() => this.dispatchEvent(input, sequence));
     } catch (err) {
       this.log('ERROR', `Error handling ${input.hook_event_name}: ${err}`);
     }
   }
 
-  private async dispatchEvent(input: HookInput): Promise<void> {
+  private async dispatchEvent(input: HookInput, sequence: number): Promise<void> {
     const sessionId = input.session_id;
     switch (input.hook_event_name) {
       case 'SessionStart':
@@ -173,7 +170,7 @@ export class HookHandler {
         await this.handleUserPromptSubmit(sessionId, input);
         return;
       case 'PreToolUse':
-        await this.handlePreToolUse(sessionId, input);
+        await this.handlePreToolUse(sessionId, input, sequence);
         return;
       case 'PermissionRequest':
         await this.handlePermissionRequest(sessionId, input);
@@ -183,13 +180,16 @@ export class HookHandler {
         return;
       case 'PostToolUse':
       case 'PostToolUseFailure':
-        await this.handlePostToolResult(sessionId, input);
+        await this.handlePostToolResult(sessionId, input, sequence);
         return;
       case 'SubagentStart':
         await this.handleSubagentStart(sessionId, input);
         return;
       case 'SubagentStop':
         await this.handleSubagentStop(sessionId, input);
+        return;
+      case 'TeammateIdle':
+        await this.handleTeammateIdle(input, sequence);
         return;
       case 'PreCompact':
         this.handlePreCompact(sessionId, input);
@@ -332,7 +332,11 @@ export class HookHandler {
       return;
     }
 
-    const result = session.submitPrompt(input.prompt_id, input.prompt);
+    const result = session.submitPrompt(
+      input.prompt_id,
+      input.prompt,
+      call => call.kind === 'agent' && this.teams.has(call),
+    );
     if (!result.created) return;
     this.log(
       'DEBUG',
@@ -362,6 +366,7 @@ export class HookHandler {
   private async handlePreToolUse(
     sessionId: string,
     input: PreToolUseHookInput,
+    sequence: number,
   ): Promise<void> {
     const descriptor = this.toolCall(input);
     if (!descriptor) return;
@@ -377,6 +382,9 @@ export class HookHandler {
       return;
     }
     const call = beginCall(session.calls, parent, descriptor);
+    if (call?.kind === 'agent') {
+      this.teams.registerDispatch(session, call, sequence);
+    }
     if (call && !input.agent_id) call.root.phase = 'active';
   }
 
@@ -435,6 +443,7 @@ export class HookHandler {
   private async handlePostToolResult(
     sessionId: string,
     input: PostToolResultHookInput,
+    sequence: number,
   ): Promise<void> {
     const result = this.toolResult(input);
     if (typeof input.tool_use_id !== 'string' || !result) return;
@@ -449,9 +458,20 @@ export class HookHandler {
       ?? await this.getOrReconstructSession(sessionId, input);
     if (!session) return;
 
-    if (!existingCall) await this.recoverCall(session, input, descriptor!);
+    const call = existingCall
+      ?? await this.recoverCall(session, input, descriptor!);
+    if (!existingCall && call?.kind === 'agent') {
+      this.teams.registerDispatch(session, call, sequence);
+    }
+    if (call?.kind === 'agent') {
+      const update = this.teams.postOutcome(call, result);
+      if (update.handled) {
+        this.settleTeamCompletions(update.completions, session);
+        return;
+      }
+    }
     recordCallOutcome(session.calls, input.tool_use_id, result);
-    session.finishSupersededTurns();
+    this.settleSession(session);
   }
 
   private toolCall(
@@ -525,9 +545,13 @@ export class HookHandler {
       ?? await this.getOrReconstructSession(sessionId, input);
     if (!session) return;
 
-    if (!existingCall) await this.recoverCall(session, input, descriptor!);
-    denyCall(session.calls, input.tool_use_id, input.reason);
-    session.finishSupersededTurns();
+    const call = existingCall
+      ?? await this.recoverCall(session, input, descriptor!);
+    const completions = call?.kind === 'agent'
+      ? this.teams.deny(call, input.reason)
+      : undefined;
+    if (!completions) denyCall(session.calls, input.tool_use_id, input.reason);
+    this.settleTeamCompletions(completions ?? [], session);
   }
 
   private async handleSubagentStart(
@@ -643,6 +667,13 @@ export class HookHandler {
       )
       : undefined;
     const lifecycle = match.kind === 'found' ? match.call : recovered;
+    if (lifecycle && this.teams.has(lifecycle)) {
+      this.log(
+        'DEBUG',
+        `Subagent stopped: agentId=${input.agent_id} awaiting TeammateIdle`,
+      );
+      return;
+    }
     const parent = match.kind === 'found'
       ? match.call.span
       : recovered?.span ?? turn?.span;
@@ -688,7 +719,31 @@ export class HookHandler {
       'DEBUG',
       `Subagent stopped: agentId=${input.agent_id} type=${input.agent_type} model=${transcript.model ?? 'unknown'} match=${match.kind}`,
     );
-    session.finishSupersededTurns();
+    this.settleSession(session);
+  }
+
+  private async handleTeammateIdle(
+    input: TeammateIdleHookInput,
+    sequence: number,
+  ): Promise<void> {
+    const result = await this.teams.recordIdle({
+      sequence,
+      teamName: input.team_name,
+      memberName: input.teammate_name,
+      transcriptPath: input.transcript_path,
+    });
+    if (!result.completions.length) {
+      this.log(
+        'DEBUG',
+        `TeammateIdle: ${result.status} ${input.team_name}::${input.teammate_name}`,
+      );
+      return;
+    }
+    this.log(
+      'DEBUG',
+      `TeammateIdle: completed ${input.team_name}::${input.teammate_name}`,
+    );
+    this.settleTeamCompletions(result.completions);
   }
 
   private async handleStop(sessionId: string, input: StopHookInput): Promise<void> {
@@ -715,14 +770,46 @@ export class HookHandler {
       ?? await this.getOrReconstructSession(sessionId, input);
     if (!session) return;
 
-    const turnCount = session.finishAtSessionEnd(input.prompt_id);
+    const result = session.finishAtSessionEnd(
+      input.prompt_id,
+      call => call.kind === 'agent'
+        && (this.teams.has(call) || this.isNamedBackgroundAgent(call)),
+    );
     this.log(
       'DEBUG',
-      `SessionEnd: session=${sessionId} reason=${input.reason} transcript_path=${session.transcriptPath} turns=${turnCount}`,
+      `SessionEnd: session=${sessionId} reason=${input.reason} transcript_path=${session.transcriptPath} turns=${result.turnCount}`,
     );
-    this.sessions.delete(sessionId);
+    if (result.deferred) {
+      this.log('INFO', `SessionEnd: deferred session ${sessionId} until background work completes`);
+      return;
+    }
+    this.closeSession(session);
+  }
+
+  private isNamedBackgroundAgent(call: TracedAgent): boolean {
+    const name = call.input['name'];
+    return typeof name === 'string' && name.trim().length > 0;
+  }
+
+  private settleSession(session: Session): void {
+    if (session.completeDeferredEnd()) {
+      this.closeSession(session);
+    }
+  }
+
+  private settleTeamCompletions(
+    completions: Array<{ owner: Session }>,
+    fallback?: Session,
+  ): void {
+    const owners = new Set(completions.map(completion => completion.owner));
+    if (!owners.size && fallback) owners.add(fallback);
+    for (const owner of owners) this.settleSession(owner);
+  }
+
+  private closeSession(session: Session): void {
+    this.sessions.delete(session.sessionId);
     session.close();
-    this.log('INFO', `Finished session ${sessionId}`);
+    this.log('INFO', `Finished session ${session.sessionId}`);
   }
 
   hasInFlightWork(): boolean {
@@ -734,13 +821,15 @@ export class HookHandler {
 
   /** Admission must be stopped before taking this snapshot. */
   async waitForPendingEvents(): Promise<void> {
-    await Promise.all([...this.sessionQueues.values()]);
+    await this.eventQueue;
   }
 
   finalizeForShutdown(): void {
     for (const session of this.sessions.values()) {
       try {
-        session.finishOpenTurns('daemon_shutdown');
+        const endTime = new Date(Date.now() + 1);
+        this.teams.orphanSession(session.sessionId, 'daemon_shutdown', endTime);
+        session.finishOpenTurns('daemon_shutdown', endTime);
       } catch (err) {
         this.log('ERROR', `Error finalizing session ${session.sessionId} at shutdown: ${err}`);
       }
