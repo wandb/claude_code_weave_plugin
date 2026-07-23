@@ -190,7 +190,7 @@ export function buildUsage(usage: UsageSummary, reasoningTokens?: number): Usage
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Added at PermissionRequest time. */
-export function addPermissionRequestEvent(tool: Tool, args: { suggestions?: unknown; timestamp: Date }): void {
+export function addPermissionRequestEvent(tool: Tool | SubAgent, args: { suggestions?: unknown; timestamp: Date }): void {
   const attrs: Attributes = {};
   if (args.suggestions !== undefined) {
     attrs[ATTR.EVT_PERMISSION_SUGGESTIONS] = jsonStr(args.suggestions);
@@ -198,8 +198,9 @@ export function addPermissionRequestEvent(tool: Tool, args: { suggestions?: unkn
   tool.addEvent(ATTR.EVT_PERMISSION_REQUEST, attrs, args.timestamp);
 }
 
-/** Added at PostToolUse[Failure] with the request outcome. */
-export function addPermissionResolvedEvent(tool: Tool, args: { approved: boolean; timestamp: Date }): void {
+/** Added when execution proves a dialog was approved, or when auto mode emits
+ * a standalone PermissionDenied decision. */
+export function addPermissionResolvedEvent(tool: Tool | SubAgent, args: { approved: boolean; timestamp: Date }): void {
   tool.addEvent(
     ATTR.EVT_PERMISSION_RESOLVED,
     { [ATTR.EVT_PERMISSION_APPROVED]: args.approved },
