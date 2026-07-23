@@ -15,11 +15,8 @@ import {
   setCompactionAttrs,
 } from './genaiSpans.js';
 import type { CompactionAttrs } from './genaiSpans.js';
-import { ToolLifecycle } from './callLifecycle.js';
-import type {
-  ToolCall,
-  ToolResult,
-} from './callLifecycle.js';
+import { finalizeOpenCalls, newCallState } from './callLifecycle.js';
+import type { TracedCall } from './callLifecycle.js';
 import {
   assistantResponses,
   extractAssistantTextBlocks,
@@ -34,11 +31,14 @@ import { TranscriptFile, readFirstTranscriptLine } from './transcriptFile.js';
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
 
 export type TurnTrace = {
+  kind: 'turn';
   span: weave.Turn;
   promptId?: string;
   userText?: string;
   /** A Stop snapshot is quiescent but remains reopenable because hooks block. */
   phase: 'active' | 'stopped';
+  /** Calls are owned by their parent span; hook ids are only lookup indexes. */
+  children: Set<TracedCall>;
   /** Number of provider responses already present when this prompt began. */
   responseOffset: number;
   /** Upper transcript boundary once this turn is known to be complete. */
@@ -83,7 +83,7 @@ export class Session {
   /** File path → latest loaded contents, preserving first-load order. */
   private readonly systemInstructions = new Map<string, string>();
   private readonly turns = new Set<TurnTrace>();
-  private readonly tools = new ToolLifecycle();
+  readonly calls = newCallState();
   private currentTurn?: TurnTrace;
   private pendingCompaction?: CompactionAttrs;
 
@@ -130,27 +130,6 @@ export class Session {
     this.systemInstructions.set(filePath, content);
   }
 
-  startTool(promptId: string | undefined, call: ToolCall): boolean {
-    const turn = this.ensureToolTurn(promptId, call.toolUseId);
-    const started = this.tools.start(turn, call);
-    if (started) turn.phase = 'active';
-    return started;
-  }
-
-  finishTool(
-    promptId: string | undefined,
-    call: ToolCall,
-    result: ToolResult,
-  ): boolean {
-    const finished = this.tools.finishOrRecover(
-      () => this.ensureToolTurn(promptId, call.toolUseId),
-      call,
-      result,
-    );
-    if (finished) this.finalizeIdleSupersededTurns();
-    return finished;
-  }
-
   submitPrompt(
     promptId: string | undefined,
     prompt: string,
@@ -166,7 +145,7 @@ export class Session {
         parseSessionFd(this.transcript.getFd()) ?? { turns: [] },
       ).length;
       responseOffsetFloor = previous.responseLimit;
-      if (promptId === undefined || !this.tools.hasOpenTools(previous)) {
+      if (promptId === undefined || previous.children.size === 0) {
         this.finalizeTurn(previous, 'superseded_by_next_prompt');
       }
     }
@@ -231,7 +210,7 @@ export class Session {
   }
 
   hasInFlightWork(): boolean {
-    return this.tools.hasOpenTools()
+    return [...this.turns].some(turn => turn.children.size > 0)
       || [...this.turns].some(turn => turn.phase === 'active');
   }
 
@@ -239,7 +218,7 @@ export class Session {
     this.transcript.close();
   }
 
-  private turnForPrompt(promptId: string | undefined): TurnTrace | undefined {
+  turnForPrompt(promptId: string | undefined): TurnTrace | undefined {
     return promptId === undefined
       ? this.currentTurn
       : [...this.turns].find(turn => turn.promptId === promptId);
@@ -308,10 +287,12 @@ export class Session {
       [ATTR.WEAVE_SOURCE]: this.source,
     });
     const turn: TurnTrace = {
+      kind: 'turn',
       span,
       promptId: options.promptId,
       userText: cursor.userText,
       phase: 'active',
+      children: new Set(),
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
@@ -321,7 +302,7 @@ export class Session {
     return turn;
   }
 
-  private ensureTurn(promptId: string | undefined): TurnTrace {
+  ensureTurn(promptId: string | undefined): TurnTrace {
     return this.turnForPrompt(promptId) ?? this.startTurn({
       promptId,
       // An exact prompt_id must not claim the last transcript turn. A legacy
@@ -331,7 +312,7 @@ export class Session {
     });
   }
 
-  private ensureToolTurn(promptId: string | undefined, toolUseId: string): TurnTrace {
+  ensureToolTurn(promptId: string | undefined, toolUseId: string): TurnTrace {
     const existing = this.turnForPrompt(promptId);
     if (existing) return existing;
 
@@ -437,17 +418,17 @@ export class Session {
   }
 
   private closeTurn(turn: TurnTrace, orphanReason: string): void {
-    for (const toolUseId of this.tools.finalizeChildren(turn, orphanReason)) {
-      this.log('DEBUG', `Closed pending tool: ${toolUseId}`);
+    for (const toolUseId of finalizeOpenCalls(this.calls, [turn], orphanReason)) {
+      this.log('DEBUG', `Closed pending call: ${toolUseId}`);
     }
     turn.span.end();
     this.turns.delete(turn);
     if (this.currentTurn === turn) this.currentTurn = undefined;
   }
 
-  private finalizeIdleSupersededTurns(): void {
+  finishSupersededTurns(): void {
     for (const turn of [...this.turns]) {
-      if (turn.responseLimit !== undefined && !this.tools.hasOpenTools(turn)) {
+      if (turn.responseLimit !== undefined && turn.children.size === 0) {
         this.finalizeTurn(turn, 'superseded_by_next_prompt');
       }
     }
