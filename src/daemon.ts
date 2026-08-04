@@ -14,7 +14,7 @@ import {
 } from './config.js';
 import type { DaemonConfig } from './config.js';
 import { loadSettings, VERSION } from './setup.js';
-import { TraceRuntime } from './traceRuntime.js';
+import { HookHandler } from './hookHandler.js';
 import { appendToLog } from './utils.js';
 
 /** Inbound control message sent directly to the socket (not a hook event). */
@@ -43,21 +43,21 @@ const INFLIGHT_HOLD_MAX_MS = 60 * 60 * 1_000;
 const CONNECTION_TIMEOUT_MS = 5_000;
 const MAX_SOCKET_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
-export class GlobalDaemon {
+export class Daemon {
   private server?: net.Server;
   private running = false;
   private lastActivity = Date.now();
   private readonly inactivityMs =
     Number(process.env.WEAVE_INACTIVITY_MS) || INACTIVITY_TIMEOUT_MS;
   private tracingEnabled = false;
-  private readonly traceRuntime: TraceRuntime;
+  private readonly hookHandler: HookHandler;
 
   constructor(
     private readonly socketPath: string,
     private readonly logFile: string,
     private readonly config: DaemonConfig,
   ) {
-    this.traceRuntime = new TraceRuntime(
+    this.hookHandler = new HookHandler(
       config.agentName,
       (level, message) => this.log(level, message),
     );
@@ -283,7 +283,7 @@ export class GlobalDaemon {
 
   private routeEvent(payload: unknown): Promise<void> {
     return this.tracingEnabled
-      ? this.traceRuntime.process(payload)
+      ? this.hookHandler.handle(payload)
       : Promise.resolve();
   }
 
@@ -299,7 +299,7 @@ export class GlobalDaemon {
   }
 
   private hasInFlightWork(): boolean {
-    return this.traceRuntime.hasInFlightWork();
+    return this.hookHandler.hasInFlightWork();
   }
 
   private async shutdown(reason: string): Promise<void> {
@@ -312,7 +312,7 @@ export class GlobalDaemon {
   private async drain(reason: string): Promise<void> {
     this.log('INFO', `Shutdown: ${reason}`);
     this.server?.close();
-    this.traceRuntime.finalizeForShutdown();
+    this.hookHandler.finalizeForShutdown();
     if (this.tracingEnabled) {
       try {
         await weave.flushOTel();
@@ -320,7 +320,7 @@ export class GlobalDaemon {
         this.log('ERROR', `Error flushing Weave SDK: ${err}`);
       }
     }
-    this.traceRuntime.closeTranscripts();
+    this.hookHandler.closeTranscripts();
     if (fs.existsSync(this.socketPath)) {
       fs.unlinkSync(this.socketPath);
     }
@@ -352,7 +352,7 @@ export async function runDaemon(): Promise<void> {
     process.exit(0);
   }
 
-  const daemon = new GlobalDaemon(socketPath, logFile, config);
+  const daemon = new Daemon(socketPath, logFile, config);
   try {
     await daemon.start();
   } catch (err) {

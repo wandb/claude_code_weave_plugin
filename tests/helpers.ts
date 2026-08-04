@@ -12,7 +12,7 @@ import { InMemorySpanExporter, SimpleSpanProcessor, type ReadableSpan } from '@o
 import * as weave from 'weave';
 
 import { MARKETPLACE_NAME, type Settings } from '../src/setup.ts';
-import { GlobalDaemon } from '../src/daemon.ts';
+import { Daemon } from '../src/daemon.ts';
 import { resolveApiKey, resolveProject } from '../src/config.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -119,7 +119,7 @@ export type DaemonDriver = {
 
 export function makeGenaiDaemon(agentName = 'claude-code'): DaemonDriver {
   const logFile = path.join(os.tmpdir(), `wcp-genai-${process.pid}.log`);
-  const d = new GlobalDaemon('/tmp/unused.sock', logFile, {
+  const d = new Daemon('/tmp/unused.sock', logFile, {
     weaveProject: 'e/p', apiKey: 'k', baseUrl: 'https://x', agentName, debug: false,
   });
   (d as unknown as { tracingEnabled: boolean }).tracingEnabled = true;

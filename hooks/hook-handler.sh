@@ -90,7 +90,7 @@ if ! is_daemon_alive; then
 
   # Wait up to 5 s (50 × 100 ms) for the daemon to accept connections.
   # The daemon unlinks any stale socket file before binding — see
-  # GlobalDaemon.start in src/daemon.ts — so we don't need to clean up here.
+  # Daemon.start in src/daemon.ts — so we don't need to clean up here.
   for i in $(seq 1 50); do
     is_daemon_alive && break
     sleep 0.1

@@ -16,7 +16,7 @@ import type {
 import * as weave from 'weave';
 import type { CompactionAttrs } from './genaiSpans.js';
 import { snippet } from './genaiSpans.js';
-import { TracedSession } from './tracedSession.js';
+import { Session } from './session.js';
 import { TranscriptFile } from './transcriptFile.js';
 
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
@@ -30,8 +30,8 @@ function parseHookInput(payload: unknown): HookInput | undefined {
     : undefined;
 }
 
-export class TraceRuntime {
-  private readonly sessions = new Map<string, TracedSession>();
+export class HookHandler {
+  private readonly sessions = new Map<string, Session>();
   private readonly sessionQueues = new Map<string, Promise<void>>();
   /** InstructionsLoaded can arrive before SessionStart. */
   private readonly pendingInstructions = new Map<string, Map<string, string>>();
@@ -41,7 +41,7 @@ export class TraceRuntime {
     private readonly log: TraceLog,
   ) {}
 
-  async process(payload: unknown): Promise<void> {
+  async handle(payload: unknown): Promise<void> {
     const input = parseHookInput(payload);
     if (!input) {
       this.log('ERROR', 'Invalid hook payload');
@@ -104,8 +104,8 @@ export class TraceRuntime {
     sessionId: string,
     transcript: TranscriptFile,
     options: { source: string; cwd: string; initialRequestModel?: string },
-  ): Promise<TracedSession> {
-    const session = await TracedSession.create({
+  ): Promise<Session> {
+    const session = await Session.create({
       sessionId,
       transcript,
       cwd: options.cwd,
@@ -152,7 +152,7 @@ export class TraceRuntime {
   private async getOrReconstructSession(
     sessionId: string,
     input: HookInput,
-  ): Promise<TracedSession | undefined> {
+  ): Promise<Session | undefined> {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;
     if (!input.transcript_path) return undefined;
@@ -204,7 +204,7 @@ export class TraceRuntime {
     );
   }
 
-  private drainPendingInstructions(session: TracedSession): void {
+  private drainPendingInstructions(session: Session): void {
     const pending = this.pendingInstructions.get(session.sessionId);
     this.pendingInstructions.delete(session.sessionId);
     if (!pending) return;

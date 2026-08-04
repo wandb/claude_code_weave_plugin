@@ -59,7 +59,7 @@ type StartTurnOptions = {
   makeCurrent?: boolean;
 };
 
-export class TracedSession {
+export class Session {
   readonly sessionId: string;
   readonly conversationId: string;
   readonly transcript: TranscriptFile;
@@ -99,13 +99,13 @@ export class TracedSession {
 
   private readonly conversation: weave.Conversation;
 
-  static async create(options: NewSessionOptions): Promise<TracedSession> {
+  static async create(options: NewSessionOptions): Promise<Session> {
     const conversationId = await resolveConversationId(
       options.sessionId,
       options.transcript.resolvedPath,
       options.log,
     );
-    return new TracedSession(options, conversationId, options.log);
+    return new Session(options, conversationId, options.log);
   }
 
   get transcriptPath(): string {
