@@ -24,6 +24,7 @@ import type {
 import {
   assistantResponses,
   extractAssistantTextBlocks,
+  isToolUseBlock,
   lastAssistantTextEndsWith,
   parseSessionFd,
 } from './parser.js';
@@ -43,7 +44,7 @@ export type TurnTrace = {
   children: Set<TracedTool>;
   /** Number of provider responses already present when this prompt began. */
   responseOffset: number;
-  /** Frozen when a newer prompt starts, preventing cross-turn replay. */
+  /** Upper transcript boundary once this turn is known to be complete. */
   responseLimit?: number;
   /** Supports repeated/blockable Stop hooks without duplicate chat spans. */
   seenResponses: Set<string>;
@@ -65,6 +66,13 @@ type StartTurnOptions = {
   recoverCurrentTurn?: boolean;
   responseOffsetFloor?: number;
   makeCurrent?: boolean;
+};
+
+type TurnCursor = {
+  responseOffset: number;
+  responseLimit?: number;
+  startTime?: Date;
+  userText?: string;
 };
 
 export class Session {
@@ -126,7 +134,7 @@ export class Session {
   }
 
   startTool(promptId: string | undefined, tool: ToolDescriptor): boolean {
-    const turn = this.ensureTurn(promptId);
+    const turn = this.ensureToolTurn(promptId, tool.toolUseId);
     const traced = this.tools.start(turn, tool);
     if (traced) turn.phase = 'active';
     return Boolean(traced);
@@ -138,7 +146,7 @@ export class Session {
     outcome: ToolOutcome,
   ): boolean {
     const finished = this.tools.finishOrRecover(
-      () => this.ensureTurn(promptId),
+      () => this.ensureToolTurn(promptId, tool.toolUseId),
       tool,
       outcome,
     );
@@ -242,7 +250,7 @@ export class Session {
 
   private transcriptCursor(
     options: StartTurnOptions,
-  ): { responseOffset: number; startTime?: Date; userText?: string } {
+  ): TurnCursor {
     const parsed = parseSessionFd(this.transcript.getFd());
     if (!parsed) return { responseOffset: 0, userText: options.userMessage };
 
@@ -261,8 +269,36 @@ export class Session {
     };
   }
 
-  private startTurn(options: StartTurnOptions = {}): TurnTrace {
-    const cursor = this.transcriptCursor(options);
+  private toolTurnCursor(toolUseId: string): TurnCursor | undefined {
+    const parsed = parseSessionFd(this.transcript.getFd());
+    if (!parsed) return undefined;
+
+    let responseOffset = 0;
+    let match: TurnCursor | undefined;
+    for (const [index, turn] of parsed.turns.entries()) {
+      const containsTool = turn.responses.some(response =>
+        response.content.some(block => isToolUseBlock(block) && block.id === toolUseId));
+      if (containsTool) {
+        // An exact tool_use_id should belong to one transcript turn. Preserve
+        // the cautious fallback if a malformed transcript makes it ambiguous.
+        if (match) return undefined;
+        const responseLimit = responseOffset + turn.responses.length;
+        match = {
+          responseOffset,
+          ...(index < parsed.turns.length - 1 ? { responseLimit } : {}),
+          startTime: parseTimestamp(turn.startTime),
+          userText: turn.userText,
+        };
+      }
+      responseOffset += turn.responses.length;
+    }
+    return match;
+  }
+
+  private startTurn(
+    options: StartTurnOptions = {},
+    cursor: TurnCursor = this.transcriptCursor(options),
+  ): TurnTrace {
     const span = this.conversation.startTurn({
       agentVersion: VERSION,
       model: this.initialRequestModel,
@@ -283,6 +319,7 @@ export class Session {
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
+    if (cursor.responseLimit !== undefined) turn.responseLimit = cursor.responseLimit;
     this.turns.add(turn);
     if (options.makeCurrent !== false) this.currentTurn = turn;
     return turn;
@@ -296,6 +333,19 @@ export class Session {
       recoverCurrentTurn: promptId === undefined,
       makeCurrent: !this.currentTurn || this.currentTurn.promptId === promptId,
     });
+  }
+
+  private ensureToolTurn(promptId: string | undefined, toolUseId: string): TurnTrace {
+    const existing = this.turnForPrompt(promptId);
+    if (existing) return existing;
+
+    const cursor = this.toolTurnCursor(toolUseId);
+    if (!cursor) return this.ensureTurn(promptId);
+    return this.startTurn({
+      promptId,
+      makeCurrent: cursor.responseLimit === undefined
+        && (!this.currentTurn || this.currentTurn.promptId === promptId),
+    }, cursor);
   }
 
   private reconcileFinalTurn(

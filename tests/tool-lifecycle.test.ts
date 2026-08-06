@@ -42,6 +42,23 @@ function makeTranscript(t: TestContext, sessionId: string, prompt: string) {
         },
       });
     },
+    appendToolUseResponse(
+      id: string,
+      toolUseId: string,
+      name: string,
+      input: Record<string, unknown>,
+    ) {
+      append({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          id,
+          model: 'claude-opus-4-8',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          content: [{ type: 'tool_use', id: toolUseId, name, input }],
+        },
+      });
+    },
   };
 }
 
@@ -172,6 +189,61 @@ test('a restart-first terminal hook recovers one exact tool and turn', async (t)
   assert.equal(
     turns[0].attributes[ATTR.INPUT_MESSAGES],
     JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'read after restart' }] }]),
+  );
+});
+
+test('a restart-first tool result recovers its prompt and triggering response', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sessionId = 'terminal-tool-response-restart';
+  const transcript = makeTranscript(t, sessionId, 'read after restart');
+  const toolUseId = 'recovered-read-response';
+  const toolInput = { file_path: '/tmp/recovered-response.txt' };
+  transcript.appendToolUseResponse('trigger-response', toolUseId, 'Read', toolInput);
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sessionId,
+    prompt_id: 'prompt-a', transcript_path: transcript.file, cwd: '/x',
+    tool_use_id: toolUseId, tool_name: 'Read', tool_input: toolInput,
+    tool_response: 'contents',
+  });
+
+  // A later prompt must not finalize an empty recovered root before SessionEnd
+  // gets a chance to reconcile it.
+  transcript.appendPrompt('next prompt');
+  await daemon.routeEvent({
+    hook_event_name: 'UserPromptSubmit', session_id: sessionId,
+    prompt_id: 'prompt-b', prompt: 'next prompt',
+  });
+  transcript.appendResponse('next-response', 'next answer');
+  await daemon.routeEvent({
+    hook_event_name: 'SessionEnd', session_id: sessionId,
+    prompt_id: 'prompt-b', reason: 'clear',
+  });
+  await flushWeave();
+
+  const spans = exporter.getFinishedSpans();
+  const tool = toolSpans(spans).find(span =>
+    span.attributes['gen_ai.tool.call.id'] === toolUseId);
+  const triggers = spans.filter(span => span.attributes[ATTR.RESPONSE_ID] === 'trigger-response');
+  assert.equal(triggers.length, 1);
+  const [trigger] = triggers;
+  assert.ok(tool && trigger);
+  assert.equal(spanParentId(tool), spanParentId(trigger));
+
+  const next = spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'next-response');
+  assert.ok(next);
+  assert.notEqual(spanParentId(trigger), spanParentId(next));
+
+  const parent = turnSpans(spans).find(turn =>
+    turn.spanContext().spanId === spanParentId(tool));
+  assert.equal(
+    parent?.attributes[ATTR.INPUT_MESSAGES],
+    JSON.stringify([{
+      role: 'user',
+      parts: [{ type: 'text', content: 'read after restart' }],
+    }]),
   );
 });
 
