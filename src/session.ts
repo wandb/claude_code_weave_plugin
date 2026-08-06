@@ -17,9 +17,8 @@ import {
 import type { CompactionAttrs } from './genaiSpans.js';
 import { ToolLifecycle } from './callLifecycle.js';
 import type {
-  ToolDescriptor,
-  ToolOutcome,
-  TracedTool,
+  ToolCall,
+  ToolResult,
 } from './callLifecycle.js';
 import {
   assistantResponses,
@@ -40,8 +39,6 @@ export type TurnTrace = {
   userText?: string;
   /** A Stop snapshot is quiescent but remains reopenable because hooks block. */
   phase: 'active' | 'stopped';
-  /** Calls are owned by their parent span; hook ids are only lookup indexes. */
-  children: Set<TracedTool>;
   /** Number of provider responses already present when this prompt began. */
   responseOffset: number;
   /** Upper transcript boundary once this turn is known to be complete. */
@@ -133,22 +130,22 @@ export class Session {
     this.systemInstructions.set(filePath, content);
   }
 
-  startTool(promptId: string | undefined, tool: ToolDescriptor): boolean {
-    const turn = this.ensureToolTurn(promptId, tool.toolUseId);
-    const traced = this.tools.start(turn, tool);
-    if (traced) turn.phase = 'active';
-    return Boolean(traced);
+  startTool(promptId: string | undefined, call: ToolCall): boolean {
+    const turn = this.ensureToolTurn(promptId, call.toolUseId);
+    const started = this.tools.start(turn, call);
+    if (started) turn.phase = 'active';
+    return started;
   }
 
   finishTool(
     promptId: string | undefined,
-    tool: ToolDescriptor,
-    outcome: ToolOutcome,
+    call: ToolCall,
+    result: ToolResult,
   ): boolean {
     const finished = this.tools.finishOrRecover(
-      () => this.ensureToolTurn(promptId, tool.toolUseId),
-      tool,
-      outcome,
+      () => this.ensureToolTurn(promptId, call.toolUseId),
+      call,
+      result,
     );
     if (finished) this.finalizeIdleSupersededTurns();
     return finished;
@@ -169,7 +166,7 @@ export class Session {
         parseSessionFd(this.transcript.getFd()) ?? { turns: [] },
       ).length;
       responseOffsetFloor = previous.responseLimit;
-      if (promptId === undefined || previous.children.size === 0) {
+      if (promptId === undefined || !this.tools.hasOpenTools(previous)) {
         this.finalizeTurn(previous, 'superseded_by_next_prompt');
       }
     }
@@ -315,7 +312,6 @@ export class Session {
       promptId: options.promptId,
       userText: cursor.userText,
       phase: 'active',
-      children: new Set(),
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
@@ -451,7 +447,7 @@ export class Session {
 
   private finalizeIdleSupersededTurns(): void {
     for (const turn of [...this.turns]) {
-      if (turn.responseLimit !== undefined && turn.children.size === 0) {
+      if (turn.responseLimit !== undefined && !this.tools.hasOpenTools(turn)) {
         this.finalizeTurn(turn, 'superseded_by_next_prompt');
       }
     }

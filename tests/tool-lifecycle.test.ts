@@ -158,6 +158,40 @@ test('PostToolUseFailure records the tool result and error type', async (t) => {
   assert.equal(span.status.code, 2);
 });
 
+test('malformed tool payloads are rejected before session recovery', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sessionId = 'invalid-tool-payloads';
+  const transcript = makeTranscript(t, sessionId, 'do not recover');
+  const daemon = makeGenaiDaemon();
+  const base = {
+    session_id: sessionId,
+    transcript_path: transcript.file,
+    cwd: '/x',
+    tool_use_id: 'invalid-tool',
+    tool_name: 'Read',
+  };
+
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', ...base, tool_input: [],
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', ...base,
+    tool_input: { file_path: '/tmp/x' }, tool_response: undefined,
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUseFailure', ...base,
+    tool_input: { file_path: '/tmp/x' }, error: { message: 'failed' },
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PreToolUse', ...base,
+    tool_input: { file_path: '/tmp/x', offset: Number.NaN },
+  });
+  await flushWeave();
+
+  assert.deepEqual(exporter.getFinishedSpans(), []);
+});
+
 test('a restart-first terminal hook recovers one exact tool and turn', async (t) => {
   const exporter = await initWeaveInMemory();
   exporter.reset();
