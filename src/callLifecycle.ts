@@ -3,7 +3,7 @@
 // SPDX-PackageName: weave-claude-code
 
 import type { Tool } from 'weave';
-import { ATTR, jsonStr, toolDisplayName } from './genaiSpans.js';
+import { ATTR, jsonStr } from './genaiSpans.js';
 import type { TurnTrace } from './session.js';
 
 export type ToolOutcome =
@@ -37,10 +37,6 @@ export class ToolLifecycle {
       args: jsonStr(tool.input),
       toolCallId: tool.toolUseId,
     });
-    span.setAttributes({
-      [ATTR.WEAVE_DISPLAY_NAME]: toolDisplayName(tool.name, tool.input),
-    });
-
     const traced = { span, parent, toolUseId: tool.toolUseId };
     parent.children.add(traced);
     this.openById.set(tool.toolUseId, traced);

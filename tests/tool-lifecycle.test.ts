@@ -123,7 +123,6 @@ test('ordinary tool calls are traced once while Agent-owned calls remain deferre
   assert.ok(turn);
   assert.equal(tools[0].attributes['gen_ai.tool.call.id'], 'read-1');
   assert.equal(tools[0].attributes['gen_ai.tool.call.result'], 'contents');
-  assert.equal(tools[0].attributes[ATTR.WEAVE_DISPLAY_NAME], 'Read: /tmp/input.txt');
   assert.equal(spanParentId(tools[0]), turn.spanContext().spanId);
 });
 
