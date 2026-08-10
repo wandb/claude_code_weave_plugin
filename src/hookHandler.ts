@@ -8,6 +8,8 @@ import type {
   BaseHookInput,
   HookInput,
   InstructionsLoadedHookInput,
+  PermissionDeniedHookInput,
+  PermissionRequestHookInput,
   PreToolUseHookInput,
   PreCompactHookInput,
   SessionEndHookInput,
@@ -23,9 +25,11 @@ import {
   backfillAgentPrompt,
   beginCall,
   bindAgent,
+  denyCall,
   matchAgent,
   recordAgentStop,
   recordCallOutcome,
+  recordPermissionRequest,
   recoverAgentCall,
   responseKeysForAgent,
 } from './callLifecycle.js';
@@ -57,7 +61,9 @@ type HookInputFor<Event extends HookInput['hook_event_name']> = Extract<
   { hook_event_name: Event }
 >;
 type PostToolResultHookInput = HookInputFor<'PostToolUse' | 'PostToolUseFailure'>;
-type RecoverCallHookInput = PostToolResultHookInput;
+type RecoverCallHookInput = HookInputFor<
+  'PermissionDenied' | 'PostToolUse' | 'PostToolUseFailure'
+>;
 
 function mergeSubagentOutput(transcriptText?: string, lastMessage?: string): string | undefined {
   const transcript = transcriptText?.trim();
@@ -168,6 +174,12 @@ export class HookHandler {
         return;
       case 'PreToolUse':
         await this.handlePreToolUse(sessionId, input);
+        return;
+      case 'PermissionRequest':
+        await this.handlePermissionRequest(sessionId, input);
+        return;
+      case 'PermissionDenied':
+        await this.handlePermissionDenied(sessionId, input);
         return;
       case 'PostToolUse':
       case 'PostToolUseFailure':
@@ -473,6 +485,49 @@ export class HookHandler {
       return undefined;
     }
     return { ok: false, error: input.error };
+  }
+
+  private async handlePermissionRequest(
+    sessionId: string,
+    input: PermissionRequestHookInput,
+  ): Promise<void> {
+    const session = await this.getOrReconstructSession(sessionId, input);
+    if (!session) return;
+    const parent = input.agent_id
+      ? session.calls.byAgentId.get(input.agent_id)
+      : session.turnForPrompt(input.prompt_id);
+    const attribution = recordPermissionRequest(session.calls, {
+      parent,
+      toolName: input.tool_name,
+      toolInput: input.tool_input,
+      suggestions: input.permission_suggestions,
+      promptId: input.prompt_id,
+    });
+    if (attribution !== 'recorded') {
+      this.log(
+        'DEBUG',
+        `PermissionRequest ${attribution}: session=${sessionId} tool=${input.tool_name}`,
+      );
+    }
+  }
+
+  private async handlePermissionDenied(
+    sessionId: string,
+    input: PermissionDeniedHookInput,
+  ): Promise<void> {
+    const existingSession = this.sessions.get(sessionId);
+    if (existingSession?.calls.toolUseTombstones.has(input.tool_use_id)) return;
+    const existingCall = existingSession?.calls.byToolUseId.get(input.tool_use_id);
+    const descriptor = existingCall ? undefined : this.toolCall(input);
+    if (!existingCall && !descriptor) return;
+
+    const session = existingSession
+      ?? await this.getOrReconstructSession(sessionId, input);
+    if (!session) return;
+
+    if (!existingCall) await this.recoverCall(session, input, descriptor!);
+    denyCall(session.calls, input.tool_use_id, input.reason);
+    session.finishSupersededTurns();
   }
 
   private async handleSubagentStart(
