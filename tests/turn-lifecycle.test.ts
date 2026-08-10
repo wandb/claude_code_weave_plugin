@@ -401,3 +401,40 @@ test('SessionEnd binds a restart-first root with the same prompt_id', async (t) 
   );
   assert.equal(spanParentId(chat), turn.spanContext().spanId);
 });
+
+test('a prompt arriving before Claude Code creates the transcript still opens a turn', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sessionId = 'prompt-before-transcript';
+  // Deliberately not created yet: Claude Code writes the file after SessionStart.
+  const dir = fs.mkdtempSync(path.join(os.homedir(), '.weave-turn-lifecycle-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sessionId,
+    transcript_path: file, source: 'startup', cwd: '/x',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'UserPromptSubmit', session_id: sessionId,
+    transcript_path: file, prompt: 'first prompt', prompt_id: 'prompt-a',
+  });
+
+  fs.writeFileSync(file, JSON.stringify(userEntry('first prompt')) + '\n');
+  fs.appendFileSync(file, JSON.stringify(assistantEntry('msg-a', 'reply')) + '\n');
+  await daemon.routeEvent({ hook_event_name: 'Stop', session_id: sessionId });
+  await daemon.routeEvent({
+    hook_event_name: 'SessionEnd', session_id: sessionId, reason: 'clear',
+  });
+  await flushWeave();
+
+  const spans = exporter.getFinishedSpans();
+  const [turn] = turns(spans);
+  assert.ok(turn, 'the first prompt must not be dropped');
+  assert.equal(
+    turn.attributes[ATTR.INPUT_MESSAGES],
+    JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'first prompt' }] }]),
+  );
+  assert.equal(chats(spans).length, 1, 'its response is still recorded');
+});

@@ -40,3 +40,32 @@ test('turn span: agentName drives gen_ai.agent.name', async () => {
     }
   }
 });
+
+test('chat spans carry gen_ai.agent.name so children are attributed before the root closes', async () => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sid = 'sess-chat-agent-name';
+  const { file, dir } = writeTranscript(sid, 'hello');
+  const d = makeGenaiDaemon('my-custom-agent');
+  try {
+    await d.routeEvent({ hook_event_name: 'SessionStart', session_id: sid, transcript_path: file, source: 'startup', cwd: '/tmp' });
+    await d.routeEvent({ hook_event_name: 'UserPromptSubmit', session_id: sid, prompt: 'hello', prompt_id: 'p1' });
+    fs.appendFileSync(file, JSON.stringify({
+      type: 'assistant',
+      message: {
+        role: 'assistant', id: 'msg-a', model: 'claude-opus-4-8',
+        usage: { input_tokens: 2, output_tokens: 5 },
+        content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn',
+      },
+    }) + '\n');
+    await d.routeEvent({ hook_event_name: 'Stop', session_id: sid });
+    await d.routeEvent({ hook_event_name: 'SessionEnd', session_id: sid, reason: 'clear' });
+    await flushWeave();
+
+    const chats = exporter.getFinishedSpans().filter(s => s.name === 'chat');
+    assert.equal(chats.length, 1, 'exactly one chat span');
+    assert.equal(chats[0].attributes[ATTR.AGENT_NAME], 'my-custom-agent');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
