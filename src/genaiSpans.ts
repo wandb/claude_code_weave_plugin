@@ -51,7 +51,6 @@ export const ATTR = {
   WEAVE_SOURCE: 'weave.claude_code.source',
   WEAVE_PLUGIN_VERSION: 'weave.claude_code.plugin.version',
   WEAVE_ORPHAN_REASON: 'weave.claude_code.orphan_reason',
-  WEAVE_DISPLAY_NAME: 'weave.claude_code.display_name',
 
   // Integration identity: unlike gen_ai.agent.name, not user-overridable and
   // never changes per subagent. Set on the conversation; propagated to every span.
@@ -225,36 +224,11 @@ export function setCompactionAttrs(turn: Turn, attrs: CompactionAttrs): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Display-name helpers
+// Formatting helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Single-line preview of a value: whitespace collapsed, truncated with `…`. */
 export function snippet(value: unknown, maxLen = 60): string {
   const s = String(value ?? '').replace(/\s+/g, ' ').trim();
   return s.length <= maxLen ? s : s.slice(0, maxLen - 1) + '…';
-}
-
-export function toolDisplayName(toolName: string, input: Record<string, unknown>): string {
-  switch (toolName) {
-    case 'Read':
-    case 'Edit':
-    case 'Write':
-      return `${toolName}: ${snippet(input['file_path'])}`;
-    case 'Glob':
-      return `Glob: ${snippet(input['pattern'])}`;
-    case 'Grep':
-      return `Grep: ${snippet(input['pattern'])}`;
-    case 'Bash':
-      return `Bash: ${snippet(input['command'])}`;
-    case 'Agent':
-      return `Agent: ${snippet(input['description'] ?? input['subagent_type'])}`;
-    case 'WebFetch':
-      return `WebFetch: ${snippet(input['url'])}`;
-    case 'WebSearch':
-      return `WebSearch: ${snippet(input['query'])}`;
-    default: {
-      const first = Object.values(input).find((v): v is string => typeof v === 'string');
-      return first ? `${toolName}: ${snippet(first)}` : toolName;
-    }
-  }
 }

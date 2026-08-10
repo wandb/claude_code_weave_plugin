@@ -15,9 +15,15 @@ import {
   setCompactionAttrs,
 } from './genaiSpans.js';
 import type { CompactionAttrs } from './genaiSpans.js';
+import { ToolLifecycle } from './callLifecycle.js';
+import type {
+  ToolCall,
+  ToolResult,
+} from './callLifecycle.js';
 import {
   assistantResponses,
   extractAssistantTextBlocks,
+  isToolUseBlock,
   lastAssistantTextEndsWith,
   parseSessionFd,
 } from './parser.js';
@@ -27,7 +33,7 @@ import { TranscriptFile, readFirstTranscriptLine } from './transcriptFile.js';
 
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
 
-type TurnTrace = {
+export type TurnTrace = {
   span: weave.Turn;
   promptId?: string;
   userText?: string;
@@ -35,7 +41,7 @@ type TurnTrace = {
   phase: 'active' | 'stopped';
   /** Number of provider responses already present when this prompt began. */
   responseOffset: number;
-  /** Frozen when a newer prompt starts, preventing cross-turn replay. */
+  /** Upper transcript boundary once this turn is known to be complete. */
   responseLimit?: number;
   /** Supports repeated/blockable Stop hooks without duplicate chat spans. */
   seenResponses: Set<string>;
@@ -59,6 +65,13 @@ type StartTurnOptions = {
   makeCurrent?: boolean;
 };
 
+type TurnCursor = {
+  responseOffset: number;
+  responseLimit?: number;
+  startTime?: Date;
+  userText?: string;
+};
+
 export class Session {
   readonly sessionId: string;
   readonly conversationId: string;
@@ -70,6 +83,7 @@ export class Session {
   /** File path → latest loaded contents, preserving first-load order. */
   private readonly systemInstructions = new Map<string, string>();
   private readonly turns = new Set<TurnTrace>();
+  private readonly tools = new ToolLifecycle();
   private currentTurn?: TurnTrace;
   private pendingCompaction?: CompactionAttrs;
 
@@ -116,6 +130,27 @@ export class Session {
     this.systemInstructions.set(filePath, content);
   }
 
+  startTool(promptId: string | undefined, call: ToolCall): boolean {
+    const turn = this.ensureToolTurn(promptId, call.toolUseId);
+    const started = this.tools.start(turn, call);
+    if (started) turn.phase = 'active';
+    return started;
+  }
+
+  finishTool(
+    promptId: string | undefined,
+    call: ToolCall,
+    result: ToolResult,
+  ): boolean {
+    const finished = this.tools.finishOrRecover(
+      () => this.ensureToolTurn(promptId, call.toolUseId),
+      call,
+      result,
+    );
+    if (finished) this.finalizeIdleSupersededTurns();
+    return finished;
+  }
+
   submitPrompt(
     promptId: string | undefined,
     prompt: string,
@@ -131,7 +166,9 @@ export class Session {
         parseSessionFd(this.transcript.getFd()) ?? { turns: [] },
       ).length;
       responseOffsetFloor = previous.responseLimit;
-      this.finalizeTurn(previous, 'superseded_by_next_prompt');
+      if (promptId === undefined || !this.tools.hasOpenTools(previous)) {
+        this.finalizeTurn(previous, 'superseded_by_next_prompt');
+      }
     }
 
     const turn = this.startTurn({
@@ -188,13 +225,14 @@ export class Session {
     const turnCount = this.turns.size;
     for (const turn of [...this.turns]) {
       this.recordFinalTurnOutput(turn, orphanReason, parsed);
-      this.endTurn(turn);
+      this.closeTurn(turn, orphanReason);
     }
     return turnCount;
   }
 
   hasInFlightWork(): boolean {
-    return [...this.turns].some(turn => turn.phase === 'active');
+    return this.tools.hasOpenTools()
+      || [...this.turns].some(turn => turn.phase === 'active');
   }
 
   close(): void {
@@ -209,7 +247,7 @@ export class Session {
 
   private transcriptCursor(
     options: StartTurnOptions,
-  ): { responseOffset: number; startTime?: Date; userText?: string } {
+  ): TurnCursor {
     const parsed = parseSessionFd(this.transcript.getFd());
     if (!parsed) return { responseOffset: 0, userText: options.userMessage };
 
@@ -228,8 +266,36 @@ export class Session {
     };
   }
 
-  private startTurn(options: StartTurnOptions = {}): TurnTrace {
-    const cursor = this.transcriptCursor(options);
+  private toolTurnCursor(toolUseId: string): TurnCursor | undefined {
+    const parsed = parseSessionFd(this.transcript.getFd());
+    if (!parsed) return undefined;
+
+    let responseOffset = 0;
+    let match: TurnCursor | undefined;
+    for (const [index, turn] of parsed.turns.entries()) {
+      const containsTool = turn.responses.some(response =>
+        response.content.some(block => isToolUseBlock(block) && block.id === toolUseId));
+      if (containsTool) {
+        // An exact tool_use_id should belong to one transcript turn. Preserve
+        // the cautious fallback if a malformed transcript makes it ambiguous.
+        if (match) return undefined;
+        const responseLimit = responseOffset + turn.responses.length;
+        match = {
+          responseOffset,
+          ...(index < parsed.turns.length - 1 ? { responseLimit } : {}),
+          startTime: parseTimestamp(turn.startTime),
+          userText: turn.userText,
+        };
+      }
+      responseOffset += turn.responses.length;
+    }
+    return match;
+  }
+
+  private startTurn(
+    options: StartTurnOptions = {},
+    cursor: TurnCursor = this.transcriptCursor(options),
+  ): TurnTrace {
     const span = this.conversation.startTurn({
       agentVersion: VERSION,
       model: this.initialRequestModel,
@@ -249,6 +315,7 @@ export class Session {
       responseOffset: cursor.responseOffset,
       seenResponses: new Set(),
     };
+    if (cursor.responseLimit !== undefined) turn.responseLimit = cursor.responseLimit;
     this.turns.add(turn);
     if (options.makeCurrent !== false) this.currentTurn = turn;
     return turn;
@@ -262,6 +329,19 @@ export class Session {
       recoverCurrentTurn: promptId === undefined,
       makeCurrent: !this.currentTurn || this.currentTurn.promptId === promptId,
     });
+  }
+
+  private ensureToolTurn(promptId: string | undefined, toolUseId: string): TurnTrace {
+    const existing = this.turnForPrompt(promptId);
+    if (existing) return existing;
+
+    const cursor = this.toolTurnCursor(toolUseId);
+    if (!cursor) return this.ensureTurn(promptId);
+    return this.startTurn({
+      promptId,
+      makeCurrent: cursor.responseLimit === undefined
+        && (!this.currentTurn || this.currentTurn.promptId === promptId),
+    }, cursor);
   }
 
   private reconcileFinalTurn(
@@ -353,13 +433,24 @@ export class Session {
 
   private finalizeTurn(turn: TurnTrace, orphanReason: string): void {
     this.recordFinalTurnOutput(turn, orphanReason, this.parseTranscript());
-    this.endTurn(turn);
+    this.closeTurn(turn, orphanReason);
   }
 
-  private endTurn(turn: TurnTrace): void {
+  private closeTurn(turn: TurnTrace, orphanReason: string): void {
+    for (const toolUseId of this.tools.finalizeChildren(turn, orphanReason)) {
+      this.log('DEBUG', `Closed pending tool: ${toolUseId}`);
+    }
     turn.span.end();
     this.turns.delete(turn);
     if (this.currentTurn === turn) this.currentTurn = undefined;
+  }
+
+  private finalizeIdleSupersededTurns(): void {
+    for (const turn of [...this.turns]) {
+      if (turn.responseLimit !== undefined && !this.tools.hasOpenTools(turn)) {
+        this.finalizeTurn(turn, 'superseded_by_next_prompt');
+      }
+    }
   }
 
   private parseTranscript(): ParsedSession | null {

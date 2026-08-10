@@ -7,6 +7,7 @@ import * as path from 'path';
 import type {
   HookInput,
   InstructionsLoadedHookInput,
+  PreToolUseHookInput,
   PreCompactHookInput,
   SessionEndHookInput,
   SessionStartHookInput,
@@ -14,12 +15,50 @@ import type {
   UserPromptSubmitHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import * as weave from 'weave';
+import type {
+  JsonObject,
+  JsonValue,
+  ToolCall,
+  ToolResult,
+} from './callLifecycle.js';
 import type { CompactionAttrs } from './genaiSpans.js';
 import { snippet } from './genaiSpans.js';
 import { Session } from './session.js';
 import { TranscriptFile } from './transcriptFile.js';
 
 type TraceLog = (level: 'DEBUG' | 'INFO' | 'ERROR', message: string) => void;
+
+type HookInputFor<Event extends HookInput['hook_event_name']> = Extract<
+  HookInput,
+  { hook_event_name: Event }
+>;
+type PostToolResultHookInput = HookInputFor<'PostToolUse' | 'PostToolUseFailure'>;
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  switch (typeof value) {
+    case 'boolean':
+    case 'string':
+      return true;
+    case 'number':
+      return Number.isFinite(value);
+    case 'object':
+      return Array.isArray(value)
+        ? value.every(isJsonValue)
+        : isJsonObject(value);
+    default:
+      return false;
+  }
+}
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype
+      || Object.getPrototypeOf(value) === null)
+    && Object.values(value).every(isJsonValue);
+}
 
 function parseHookInput(payload: unknown): HookInput | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
@@ -85,6 +124,13 @@ export class HookHandler {
         return;
       case 'UserPromptSubmit':
         await this.handleUserPromptSubmit(sessionId, input);
+        return;
+      case 'PreToolUse':
+        await this.handlePreToolUse(sessionId, input);
+        return;
+      case 'PostToolUse':
+      case 'PostToolUseFailure':
+        await this.handlePostToolResult(sessionId, input);
         return;
       case 'PreCompact':
         this.handlePreCompact(sessionId, input);
@@ -252,6 +298,64 @@ export class HookHandler {
     } else {
       this.log('INFO', `PreCompact buffered; will attach to next turn (session ${sessionId})`);
     }
+  }
+
+  private async handlePreToolUse(
+    sessionId: string,
+    input: PreToolUseHookInput,
+  ): Promise<void> {
+    if (input.tool_name === 'Agent' || input.agent_id) return;
+    const call = this.toolCall(input);
+    if (!call) return;
+    const session = await this.getOrReconstructSession(sessionId, input);
+    if (!session) return;
+    session.startTool(input.prompt_id, call);
+  }
+
+  private async handlePostToolResult(
+    sessionId: string,
+    input: PostToolResultHookInput,
+  ): Promise<void> {
+    if (input.tool_name === 'Agent' || input.agent_id) return;
+    const call = this.toolCall(input);
+    const result = this.toolResult(input);
+    if (!call || !result) return;
+    const session = await this.getOrReconstructSession(sessionId, input);
+    if (!session) return;
+    session.finishTool(input.prompt_id, call, result);
+  }
+
+  private toolCall(
+    input: Pick<PreToolUseHookInput, 'tool_use_id' | 'tool_name' | 'tool_input'>,
+  ): ToolCall | undefined {
+    if (
+      typeof input.tool_use_id !== 'string'
+      || typeof input.tool_name !== 'string'
+      || !isJsonObject(input.tool_input)
+    ) {
+      this.log('ERROR', 'Invalid tool hook payload');
+      return undefined;
+    }
+    return {
+      toolUseId: input.tool_use_id,
+      name: input.tool_name,
+      input: input.tool_input,
+    };
+  }
+
+  private toolResult(input: PostToolResultHookInput): ToolResult | undefined {
+    if (input.hook_event_name === 'PostToolUse') {
+      if (!isJsonValue(input.tool_response)) {
+        this.log('ERROR', 'Invalid tool result payload');
+        return undefined;
+      }
+      return { ok: true, output: input.tool_response };
+    }
+    if (typeof input.error !== 'string') {
+      this.log('ERROR', 'Invalid tool result payload');
+      return undefined;
+    }
+    return { ok: false, error: input.error };
   }
 
   private async handleStop(sessionId: string, input: StopHookInput): Promise<void> {
