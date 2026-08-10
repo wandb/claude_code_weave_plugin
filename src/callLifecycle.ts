@@ -337,6 +337,7 @@ function finishAgentSpan(
   call: TracedAgent,
   outcome: ToolResult,
   failureType?: string,
+  endTime?: Date,
 ): void {
   const output = outcome.ok ? outcome.output : outcome.error;
   if (output !== undefined && output !== null && output !== '') {
@@ -344,11 +345,14 @@ function finishAgentSpan(
     call.span.setAttributes({ [ATTR.OUTPUT_MESSAGES]: assistantOutputMessages([text]) });
   }
   if (outcome.ok) {
-    call.span.end();
+    call.span.end(endTime ? { endTime } : undefined);
     return;
   }
   call.span.setAttributes({ [ATTR.ERROR_TYPE]: failureType ?? errorType(outcome.error) });
-  call.span.end({ error: new Error(outcome.error) });
+  call.span.end({
+    error: new Error(outcome.error),
+    ...(endTime ? { endTime } : {}),
+  });
 }
 
 function errorType(error: string): string {
@@ -434,19 +438,21 @@ export function finalizeOpenCalls(
   state: CallState,
   roots: Iterable<TurnTrace>,
   reason: string,
+  endTime?: Date,
 ): string[] {
   const closed: string[] = [];
   const closeChildren = (parent: CallParent) => {
     for (const call of [...parent.children].reverse()) {
       if (call.kind === 'agent') closeChildren(call);
       if (call.kind === 'agent' && call.outcome) {
-        finishAgentSpan(call, call.outcome);
+        finishAgentSpan(call, call.outcome, undefined, endTime);
       } else if (call.kind === 'agent' && !call.toolUseId && call.stopSeen) {
-        call.span.end();
+        call.span.end(endTime ? { endTime } : undefined);
       } else {
         call.span.setAttributes({ [ATTR.WEAVE_ORPHAN_REASON]: reason });
         call.span.end({
           error: new Error(`call did not complete (${reason})`),
+          ...(endTime ? { endTime } : {}),
         });
       }
       completeCall(state, call, false);

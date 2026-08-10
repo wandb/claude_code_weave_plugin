@@ -732,6 +732,11 @@ export class HookHandler {
     return false;
   }
 
+  /** Admission must be stopped before taking this snapshot. */
+  async waitForPendingEvents(): Promise<void> {
+    await Promise.all([...this.sessionQueues.values()]);
+  }
+
   finalizeForShutdown(): void {
     for (const session of this.sessions.values()) {
       try {
