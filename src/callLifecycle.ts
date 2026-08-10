@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-PackageName: weave-claude-code
 
-import type { Tool } from 'weave';
-import { ATTR, jsonStr } from './genaiSpans.js';
+import type { SubAgent, Tool } from 'weave';
+import { ATTR, assistantOutputMessages, jsonStr } from './genaiSpans.js';
+import type { SpanParent } from './genaiSpans.js';
+import { VERSION } from './setup.js';
 import type { TurnTrace } from './session.js';
 
 export type JsonValue =
@@ -26,92 +28,344 @@ export type ToolResult =
   | { ok: true; output: JsonValue }
   | { ok: false; error: string };
 
-type OpenTool = {
+export type CallParent = TurnTrace | TracedAgent;
+
+type CallScope = {
+  parent: CallParent;
+  root: TurnTrace;
+};
+
+type TracedTool = CallScope & {
+  kind: 'tool';
   span: Tool;
-  turn: TurnTrace;
   toolUseId: string;
 };
 
-/** Owns the exact hook identities for ordinary tools in one session. */
-export class ToolLifecycle {
-  private readonly openById = new Map<string, OpenTool>();
-  private readonly openIdsByTurn = new Map<TurnTrace, Set<string>>();
-  private readonly tombstones = new Set<string>();
+export type TracedAgent = CallScope & {
+  kind: 'agent';
+  span: SubAgent;
+  toolUseId?: string;
+  /** Agent span name chosen from Agent input; `name` is only an instance alias. */
+  agentType: string;
+  /** Lifecycle identity, unknown when Agent input omitted `subagent_type`. */
+  declaredAgentType?: string;
+  prompt: string;
+  agentId?: string;
+  outcome?: ToolResult;
+  stopSeen: boolean;
+  children: Set<TracedCall>;
+  /** Chat responses already emitted from this Agent's Stop snapshots. */
+  seenResponses: Set<string>;
+};
 
-  start(turn: TurnTrace, call: ToolCall): boolean {
-    return Boolean(this.open(turn, call));
-  }
+export type TracedCall = TracedTool | TracedAgent;
 
-  private open(turn: TurnTrace, call: ToolCall): OpenTool | undefined {
-    if (this.openById.has(call.toolUseId) || this.tombstones.has(call.toolUseId)) {
-      return undefined;
-    }
+/** Secondary indexes for the identities exposed by Claude's hooks. */
+export type CallState = {
+  byToolUseId: Map<string, TracedCall>;
+  byAgentId: Map<string, TracedAgent>;
+  /** Prevent duplicate or delayed hooks from reopening completed calls. */
+  toolUseTombstones: Set<string>;
+  agentTombstones: Set<string>;
+  /** Dedupe state for Stop snapshots whose Agent call is still ambiguous. */
+  uncorrelatedAgentResponses: Map<string, Set<string>>;
+};
 
-    const span = turn.span.startTool({
-      name: call.name,
-      args: jsonStr(call.input),
-      toolCallId: call.toolUseId,
+export function newCallState(): CallState {
+  return {
+    byToolUseId: new Map(),
+    byAgentId: new Map(),
+    toolUseTombstones: new Set(),
+    agentTombstones: new Set(),
+    uncorrelatedAgentResponses: new Map(),
+  };
+}
+
+function attachCall(state: CallState, call: TracedCall): void {
+  call.parent.children.add(call);
+  if (call.toolUseId) state.byToolUseId.set(call.toolUseId, call);
+  if (call.kind === 'agent' && call.agentId) state.byAgentId.set(call.agentId, call);
+}
+
+/** Open the span represented by PreToolUse. Agent is the only special tool:
+ * its invoke-agent span becomes the parent of later child hooks. */
+export function beginCall(
+  state: CallState,
+  parent: CallParent,
+  args: ToolCall,
+): TracedCall | undefined {
+  if (parent.kind === 'agent' && parent.stopSeen && parent.outcome) return undefined;
+  if (state.byToolUseId.has(args.toolUseId)
+    || state.toolUseTombstones.has(args.toolUseId)) return undefined;
+
+  const root = parent.kind === 'turn' ? parent : parent.root;
+  let call: TracedCall;
+  if (args.name === 'Agent') {
+    const agentType = agentTypeFor(args.input);
+    const prompt = typeof args.input['prompt'] === 'string' ? args.input['prompt'] : '';
+    const span = startAgentSpan(parent.span, agentType, prompt);
+    span.setAttributes({ [ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID]: args.toolUseId });
+    call = {
+      kind: 'agent',
+      span,
+      toolUseId: args.toolUseId,
+      agentType,
+      declaredAgentType: declaredAgentTypeFor(args.input),
+      prompt,
+      parent,
+      root,
+      stopSeen: false,
+      children: new Set(),
+      seenResponses: new Set(),
+    };
+  } else {
+    const span = parent.span.startTool({
+      name: args.name,
+      args: jsonStr(args.input),
+      toolCallId: args.toolUseId,
     });
-    const open = { span, turn, toolUseId: call.toolUseId };
-    const openIds = this.openIdsByTurn.get(turn) ?? new Set<string>();
-    openIds.add(call.toolUseId);
-    this.openIdsByTurn.set(turn, openIds);
-    this.openById.set(call.toolUseId, open);
-    return open;
-  }
-
-  /** A terminal hook may be the first hook observed after a daemon restart. */
-  finishOrRecover(
-    turn: () => TurnTrace,
-    call: ToolCall,
-    result: ToolResult,
-  ): boolean {
-    if (this.tombstones.has(call.toolUseId)) return false;
-    const open = this.openById.get(call.toolUseId) ?? this.open(turn(), call);
-    if (!open) return false;
-
-    if (result.ok) {
-      open.span.result = jsonStr(result.output);
-      open.span.end();
-    } else {
-      const error = result.error;
-      open.span.result = error;
-      open.span.setAttributes({ [ATTR.ERROR_TYPE]: errorType(error) });
-      open.span.end({ error: new Error(error) });
+    if (parent.kind === 'agent') {
+      span.setAttributes({ [ATTR.AGENT_NAME]: parent.agentType });
     }
-    this.complete(call.toolUseId, open);
-    return true;
+    call = {
+      kind: 'tool',
+      span,
+      toolUseId: args.toolUseId,
+      parent,
+      root,
+    };
   }
 
-  /** End every unfinished child before its owning turn. */
-  finalizeChildren(turn: TurnTrace, reason: string): string[] {
-    const closed: string[] = [];
-    for (const toolUseId of [...(this.openIdsByTurn.get(turn) ?? [])].reverse()) {
-      const open = this.openById.get(toolUseId);
-      if (!open) continue;
-      open.span.setAttributes({ [ATTR.WEAVE_ORPHAN_REASON]: reason });
-      open.span.end({ error: new Error(`call did not complete (${reason})`) });
-      this.complete(toolUseId, open);
-      closed.push(toolUseId);
-    }
-    return closed;
-  }
+  attachCall(state, call);
+  return call;
+}
 
-  hasOpenTools(turn?: TurnTrace): boolean {
-    return turn
-      ? Boolean(this.openIdsByTurn.get(turn)?.size)
-      : this.openById.size > 0;
-  }
+function declaredAgentTypeFor(input: Record<string, unknown>): string | undefined {
+  const value = input['subagent_type'];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
 
-  private complete(toolUseId: string, open: OpenTool): void {
-    const openIds = this.openIdsByTurn.get(open.turn);
-    openIds?.delete(toolUseId);
-    if (openIds?.size === 0) this.openIdsByTurn.delete(open.turn);
-    this.openById.delete(toolUseId);
-    this.tombstones.add(toolUseId);
+function agentTypeFor(input: Record<string, unknown>): string {
+  const name = input['name'];
+  return declaredAgentTypeFor(input)
+    ?? (typeof name === 'string' && name.trim() ? name.trim() : 'Agent');
+}
+
+function startAgentSpan(parent: SpanParent, agentName: string, prompt: string): SubAgent {
+  const span = parent.startSubagent({ name: agentName, agentVersion: VERSION });
+  if (prompt) {
+    span.setAttributes({ [ATTR.INPUT_MESSAGES]: jsonStr([{ role: 'user', content: prompt }]) });
   }
+  return span;
+}
+
+type RecoverAgentArgs = {
+  agentId: string;
+  agentType: string;
+  prompt: string;
+  event: 'SubagentStart' | 'SubagentStop';
+};
+
+/** Recreate an Agent marker when a lifecycle hook is first after restart. */
+export function recoverAgentCall(
+  state: CallState,
+  parent: CallParent,
+  args: RecoverAgentArgs,
+): TracedAgent {
+  const root = parent.kind === 'turn' ? parent : parent.root;
+  const span = startAgentSpan(parent.span, args.agentType, args.prompt);
+  span.record({ agentId: args.agentId });
+  const call: TracedAgent = {
+    kind: 'agent',
+    span,
+    agentType: args.agentType,
+    declaredAgentType: args.agentType,
+    prompt: args.prompt,
+    parent,
+    root,
+    agentId: args.agentId,
+    stopSeen: args.event === 'SubagentStop',
+    children: new Set(),
+    seenResponses: new Set(),
+  };
+  attachCall(state, call);
+  return call;
+}
+
+export function backfillAgentPrompt(call: TracedAgent, prompt: string): void {
+  if (call.prompt.trim() || !prompt.trim()) return;
+  call.prompt = prompt;
+  call.span.setAttributes({
+    [ATTR.INPUT_MESSAGES]: jsonStr([{ role: 'user', content: prompt }]),
+  });
+}
+
+/** Prefer lifecycle-owned response dedupe, retaining a fallback only while
+ * correlation is ambiguous. */
+export function responseKeysForAgent(
+  state: CallState,
+  agentId: string,
+  call?: TracedAgent,
+): Set<string> {
+  const uncorrelated = state.uncorrelatedAgentResponses.get(agentId);
+  if (!call) {
+    const seen = uncorrelated ?? new Set<string>();
+    state.uncorrelatedAgentResponses.set(agentId, seen);
+    return seen;
+  }
+  if (uncorrelated) {
+    for (const key of uncorrelated) call.seenResponses.add(key);
+    state.uncorrelatedAgentResponses.delete(agentId);
+  }
+  return call.seenResponses;
+}
+
+/** Apply the exact tool_use_id terminal event once. */
+export function recordCallOutcome(
+  state: CallState,
+  toolUseId: string,
+  outcome: ToolResult,
+): void {
+  const call = state.byToolUseId.get(toolUseId);
+  if (!call) return;
+
+  if (call.kind === 'tool') {
+    finishToolCall(call, outcome);
+    completeCall(state, call);
+    return;
+  }
+  call.outcome ??= outcome;
+  finishAgentIfReady(state, call);
+}
+
+function finishToolCall(call: TracedTool, outcome: ToolResult): void {
+  if (outcome.ok) {
+    call.span.result = jsonStr(outcome.output);
+    call.span.end();
+    return;
+  }
+  const error = outcome.error;
+  call.span.result = error;
+  call.span.setAttributes({ [ATTR.ERROR_TYPE]: errorType(error) });
+  call.span.end({ error: new Error(error) });
+}
+
+function finishAgentSpan(call: TracedAgent, outcome: ToolResult): void {
+  const output = outcome.ok ? outcome.output : outcome.error;
+  if (output !== undefined && output !== null && output !== '') {
+    const text = typeof output === 'string' ? output : jsonStr(output);
+    call.span.setAttributes({ [ATTR.OUTPUT_MESSAGES]: assistantOutputMessages([text]) });
+  }
+  if (outcome.ok) {
+    call.span.end();
+    return;
+  }
+  call.span.setAttributes({ [ATTR.ERROR_TYPE]: errorType(outcome.error) });
+  call.span.end({ error: new Error(outcome.error) });
 }
 
 function errorType(error: string): string {
   return error.trim().match(/^[A-Z][A-Za-z_]*Error/)?.[0] ?? 'tool_error';
+}
+
+export type AgentMatch =
+  | { kind: 'found'; call: TracedAgent }
+  | { kind: 'missing' }
+  | { kind: 'ambiguous' };
+
+export function matchAgent(
+  state: CallState,
+  agentType: string,
+  prompt: string | undefined,
+  promptId?: string,
+): AgentMatch {
+  const candidates = [...state.byToolUseId.values()].filter((call): call is TracedAgent =>
+    call.kind === 'agent'
+    && !call.agentId
+    && call.root.promptId === promptId
+    && (call.declaredAgentType === undefined || call.declaredAgentType === agentType));
+  const matches = prompt === undefined
+    ? candidates
+    : candidates.filter(call => call.prompt.trim() === prompt.trim());
+  if (matches.length === 1) return { kind: 'found', call: matches[0] };
+  if (matches.length > 1 || (matches.length === 0 && candidates.length > 1)) {
+    return { kind: 'ambiguous' };
+  }
+  return { kind: 'missing' };
+}
+
+export function bindAgent(
+  state: CallState,
+  match: Extract<AgentMatch, { kind: 'found' }>,
+  agentId: string,
+  agentType: string,
+): void {
+  if (state.byAgentId.has(agentId) || match.call.agentId) return;
+  match.call.declaredAgentType ??= agentType;
+  match.call.agentId = agentId;
+  match.call.span.record({ agentId });
+  state.byAgentId.set(agentId, match.call);
+}
+
+/** Record a blockable Stop snapshot, completing only when Post already arrived. */
+export function recordAgentStop(
+  state: CallState,
+  match: Extract<AgentMatch, { kind: 'found' }>,
+): void {
+  match.call.stopSeen = true;
+  finishAgentIfReady(state, match.call);
+}
+
+function finishAgentIfReady(state: CallState, call: TracedAgent): void {
+  if (!call.stopSeen || !call.outcome || call.children.size) return;
+  finishAgentSpan(call, call.outcome);
+  completeCall(state, call);
+}
+
+function completeCall(
+  state: CallState,
+  call: TracedCall,
+  finishParent = true,
+): void {
+  call.parent.children.delete(call);
+  if (call.toolUseId) {
+    state.byToolUseId.delete(call.toolUseId);
+    state.toolUseTombstones.add(call.toolUseId);
+  }
+  if (call.kind === 'agent' && call.agentId) {
+    state.byAgentId.delete(call.agentId);
+    state.agentTombstones.add(call.agentId);
+  }
+  if (finishParent && call.parent.kind === 'agent') {
+    finishAgentIfReady(state, call.parent);
+  }
+}
+
+/** Close children before parents. Preserve real Agent results and completed
+ * recovered snapshots; only genuinely unfinished calls are marked orphaned. */
+export function finalizeOpenCalls(
+  state: CallState,
+  roots: Iterable<TurnTrace>,
+  reason: string,
+): string[] {
+  const closed: string[] = [];
+  const closeChildren = (parent: CallParent) => {
+    for (const call of [...parent.children].reverse()) {
+      if (call.kind === 'agent') closeChildren(call);
+      if (call.kind === 'agent' && call.outcome) {
+        finishAgentSpan(call, call.outcome);
+      } else if (call.kind === 'agent' && !call.toolUseId && call.stopSeen) {
+        call.span.end();
+      } else {
+        call.span.setAttributes({ [ATTR.WEAVE_ORPHAN_REASON]: reason });
+        call.span.end({
+          error: new Error(`call did not complete (${reason})`),
+        });
+      }
+      completeCall(state, call, false);
+      closed.push(call.toolUseId ?? `agent:${call.kind === 'agent' ? call.agentId : 'unknown'}`);
+    }
+  };
+  for (const root of [...roots].reverse()) closeChildren(root);
+  return closed;
 }
