@@ -386,10 +386,7 @@ interface StatusReport {
    *  it predates identity reporting. Lets you confirm which build is actually
    *  running (e.g. a linked local dev build vs the published install). */
   daemon: { pid: number | null; version: string | null; path: string | null };
-  /** Most recent OTLP export the trace server rejected, as reported by the live
-   *  daemon. Null when nothing was rejected, no daemon is alive, or the daemon
-   *  predates this field. A rejection means spans are being dropped even though
-   *  hooks are still captured, so it does not affect `ready_to_trace`. */
+  /** Last rejected export per the live daemon. Null also means unknown: no daemon, or one predating this field. */
   last_export_error: ExportErrorSnapshot | null;
   ready_to_trace: boolean;
   view_traces_url: string | null;
@@ -630,8 +627,7 @@ function printPrettyStatus(snap: StatusSnapshot): void {
     if (report.config_drift) {
       statusRow('⚠', 'Config', 'daemon on an older config', 'weave-claude-code restart');
     }
-    // Hooks keep being captured while exports are rejected, so this is the only
-    // place a silently dropped trace becomes visible.
+    // Hooks keep being captured while exports are rejected, so nothing else shows the drop.
     if (report.last_export_error) {
       const { code, message, count, at } = report.last_export_error;
       const label = code ? `${code} ${message}` : message;

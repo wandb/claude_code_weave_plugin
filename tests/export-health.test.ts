@@ -2,11 +2,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-PackageName: weave-claude-code
 
-// Export health: the daemon records rejected OTLP exports and reports the last
-// one on the `config-hash` control reply, so `status` can show that spans are
-// being dropped. Only failures are observable — the OTel diag logger fires on
-// error, so there is no success signal to clear the state with.
-//
 // Sockets live under /tmp (macOS 104-char path cap); see stale-daemon-socket.test.ts.
 
 import { test, suite, before, after } from 'node:test';
