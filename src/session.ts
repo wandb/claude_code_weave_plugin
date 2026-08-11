@@ -81,6 +81,7 @@ export class Session {
   readonly sessionId: string;
   readonly conversationId: string;
   readonly transcript: TranscriptFile;
+  private readonly agentName: string;
   readonly cwd: string;
   readonly source: string;
   readonly initialRequestModel?: string;
@@ -102,6 +103,7 @@ export class Session {
     this.sessionId = options.sessionId;
     this.conversationId = conversationId;
     this.transcript = options.transcript;
+    this.agentName = options.agentName;
     this.cwd = options.cwd;
     this.source = options.source;
     this.initialRequestModel = options.initialRequestModel;
@@ -149,7 +151,7 @@ export class Session {
     let responseOffsetFloor: number | undefined;
     if (previous) {
       previous.responseLimit ??= assistantResponses(
-        parseSessionFd(this.transcript.getFd()) ?? { turns: [] },
+        this.parseTranscript() ?? { turns: [] },
       ).length;
       responseOffsetFloor = previous.responseLimit;
       if (promptId === undefined) {
@@ -259,7 +261,7 @@ export class Session {
   private transcriptCursor(
     options: StartTurnOptions,
   ): TurnCursor {
-    const parsed = parseSessionFd(this.transcript.getFd());
+    const parsed = this.parseTranscript();
     if (!parsed) return { responseOffset: 0, userText: options.userMessage };
 
     const responses = assistantResponses(parsed);
@@ -278,7 +280,7 @@ export class Session {
   }
 
   private toolTurnCursor(toolUseId: string): TurnCursor | undefined {
-    const parsed = parseSessionFd(this.transcript.getFd());
+    const parsed = this.parseTranscript();
     if (!parsed) return undefined;
 
     let responseOffset = 0;
@@ -416,7 +418,10 @@ export class Session {
     responses: AssistantResponse[],
     options: { lastMessage?: string; orphanReason?: string } = {},
   ): void {
-    emitChatSpans(turn.span, responses, { seen: turn.seenResponses });
+    emitChatSpans(turn.span, responses, {
+      agentName: this.agentName,
+      seen: turn.seenResponses,
+    });
 
     const text = responses.flatMap(response => extractAssistantTextBlocks(response.content));
     if (!text.length && options.lastMessage) text.push(options.lastMessage);
@@ -495,11 +500,13 @@ export class Session {
     return [...this.turns].some(turn => turn.children.size > 0);
   }
 
+  /** Claude Code creates the transcript after SessionStart, so an absent file is
+   *  an expected early state rather than a failure. */
   private parseTranscript(): ParsedSession | null {
     try {
       return parseSessionFd(this.transcript.getFd());
     } catch (error) {
-      this.log('DEBUG', `Could not recover chat spans while closing turn: ${error}`);
+      this.log('DEBUG', `Transcript not readable yet: ${error}`);
       return null;
     }
   }
