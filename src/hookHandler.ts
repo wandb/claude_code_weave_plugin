@@ -26,9 +26,11 @@ import {
   backfillAgentPrompt,
   beginCall,
   bindAgent,
+  bindAgentToolUse,
   denyCall,
   isDuplicateToolUse,
   matchAgent,
+  matchRecoveredAgent,
   recordAgentStop,
   recordCallOutcome,
   recordPermissionRequest,
@@ -494,6 +496,23 @@ export class HookHandler {
       ? await this.resolveCallParent(session, input)
       : session.ensureToolTurn(input.prompt_id, descriptor.toolUseId);
     if (!parent) return undefined;
+    if (descriptor.name === 'Agent' && input.hook_event_name !== 'PermissionDenied') {
+      const match = matchRecoveredAgent(session.calls, parent, descriptor);
+      if (match.kind === 'found') {
+        bindAgentToolUse(session.calls, match.call, descriptor.toolUseId);
+        this.log(
+          'INFO',
+          `Bound Stop-first Agent ${match.call.agentId} to ${descriptor.toolUseId}`,
+        );
+        return match.call;
+      }
+      if (match.kind === 'ambiguous') {
+        this.log(
+          'DEBUG',
+          `Ambiguous Stop-first Agent for ${descriptor.toolUseId}; keeping markers separate`,
+        );
+      }
+    }
     return beginCall(session.calls, parent, descriptor);
   }
 

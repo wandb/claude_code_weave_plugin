@@ -438,6 +438,45 @@ export function matchAgent(
   return { kind: 'missing' };
 }
 
+/** An agent owner must match exactly; sibling root turns are interchangeable. */
+function sameOwner(candidate: CallParent, resolved: CallParent): boolean {
+  return resolved.kind === 'agent' || candidate.kind === 'agent'
+    ? candidate === resolved
+    : true;
+}
+
+export function matchRecoveredAgent(
+  state: CallState,
+  parent: CallParent,
+  args: ToolCall,
+): AgentMatch {
+  const agentType = agentTypeFor(args.input);
+  const prompt = typeof args.input['prompt'] === 'string' ? args.input['prompt'].trim() : '';
+  const candidates = [...state.byAgentId.values()].filter(call =>
+    !call.toolUseId
+    && sameOwner(call.parent, parent)
+    && (call.declaredAgentType === undefined || call.declaredAgentType === agentType));
+  const matches = prompt
+    ? candidates.filter(call => call.prompt.trim() === prompt)
+    : candidates;
+  if (matches.length === 1) return { kind: 'found', call: matches[0] };
+  if (matches.length > 1 || (matches.length === 0 && candidates.length > 1)) {
+    return { kind: 'ambiguous' };
+  }
+  return { kind: 'missing' };
+}
+
+export function bindAgentToolUse(
+  state: CallState,
+  call: TracedAgent,
+  toolUseId: string,
+): void {
+  if (call.toolUseId || state.byToolUseId.has(toolUseId)) return;
+  call.toolUseId = toolUseId;
+  state.byToolUseId.set(toolUseId, call);
+  call.span.setAttributes({ [ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID]: toolUseId });
+}
+
 export function bindAgent(
   state: CallState,
   match: Extract<AgentMatch, { kind: 'found' }>,

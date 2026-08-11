@@ -350,3 +350,165 @@ test('restart recovery keeps a later Agent call separate', async (t) => {
     JSON.stringify([{ role: 'assistant', content: 'must not replace the recovered transcript' }]),
   );
 });
+
+// A Stop-first restart recovers an Agent by agent_id but never learns its
+// tool_use_id, so the late Agent PostToolUse has to join that marker.
+test('a Stop-first recovered Agent adopts its late PostToolUse', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sid = 'sub-stop-first-adopts';
+  const agentId = 'stop-first-agent';
+  const transcript = makeTranscript(t, sid, sid);
+  transcript.append(userEntry('delegate it'));
+  const subPath = transcript.subagent(
+    agentId,
+    userEntry('do it'),
+    assistantEntry('sub-msg-1', { type: 'text', text: 'done' }, {
+      usage: { input_tokens: 120, output_tokens: 30 }, finishReason: 'end_turn',
+    }),
+  );
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sid,
+    transcript_path: transcript.file, source: 'startup', cwd: '/x',
+  });
+  // No PreToolUse and no SubagentStart: the daemon restarted mid-Agent.
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath,
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'do it' },
+    tool_response: 'done',
+  });
+  await finish(daemon, sid);
+
+  const agents = exporter.getFinishedSpans().filter(span =>
+    span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] === 'Explore');
+  assert.equal(agents.length, 1, 'one Agent span, not a duplicate');
+  assert.equal(agents[0].attributes[ATTR.AGENT_ID], agentId);
+  assert.equal(
+    agents[0].attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID],
+    'agent-call',
+    'the recovered span adopts the tool_use_id',
+  );
+});
+
+test('a Stop-first recovered Agent ignores a PostToolUse for a different prompt', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sid = 'sub-stop-first-other-prompt';
+  const agentId = 'other-prompt-agent';
+  const transcript = makeTranscript(t, sid, sid);
+  transcript.append(userEntry('delegate it'));
+  const subPath = transcript.subagent(agentId, userEntry('do it'));
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sid,
+    transcript_path: transcript.file, source: 'startup', cwd: '/x',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath,
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'unrelated-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'a different task' },
+    tool_response: 'other result',
+  });
+  await finish(daemon, sid);
+
+  const agents = exporter.getFinishedSpans().filter(span =>
+    span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] === 'Explore');
+  assert.equal(agents.length, 2, 'different prompts stay separate');
+});
+
+test('ambiguous Stop-first Agent candidates are not guessed', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sid = 'sub-stop-first-ambiguous';
+  const transcript = makeTranscript(t, sid, sid);
+  transcript.append(userEntry('delegate twice'));
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sid,
+    transcript_path: transcript.file, source: 'startup', cwd: '/x',
+  });
+  // Two recovered markers, same type and same prompt: nothing distinguishes them.
+  for (const agentId of ['ambiguous-a', 'ambiguous-b']) {
+    const subPath = transcript.subagent(agentId, userEntry('same task'));
+    await daemon.routeEvent({
+      hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+      agent_type: 'Explore', agent_transcript_path: subPath,
+    });
+  }
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid, tool_use_id: 'agent-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'same task' },
+    tool_response: 'done',
+  });
+  await finish(daemon, sid);
+
+  const agents = exporter.getFinishedSpans().filter(span =>
+    span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] === 'Explore');
+  const adopted = agents.filter(span =>
+    span.attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID] === 'agent-call');
+  assert.equal(agents.length, 3, 'both markers survive plus the unjoined result');
+  assert.equal(adopted.length, 1, 'the tool_use_id is not attached to a guess');
+  assert.equal(adopted[0].attributes[ATTR.AGENT_ID], undefined, 'and not to either marker');
+});
+
+// A recovery attaches to whichever turn was current, while the late result
+// resolves the turn holding its tool_use_id. Those differ when the dispatch
+// lives in an earlier transcript turn, and the marker must still be adopted.
+test('a Stop-first recovered Agent adopts a late Post whose dispatch is in an earlier turn', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sid = 'sub-stop-first-earlier-turn';
+  const agentId = 'earlier-turn-agent';
+  const transcript = makeTranscript(t, sid, sid);
+  transcript.append(userEntry('old prompt'));
+  transcript.append(assistantEntry('msg-old', {
+    type: 'tool_use', id: 'agent-call', name: 'Agent',
+    input: { subagent_type: 'Explore', prompt: 'do it' },
+  }));
+  transcript.append(userEntry('new prompt'));
+  const subPath = transcript.subagent(
+    agentId,
+    userEntry('do it'),
+    assistantEntry('sub-msg-1', { type: 'text', text: 'done' }, {
+      usage: { input_tokens: 120, output_tokens: 30 }, finishReason: 'end_turn',
+    }),
+  );
+  const daemon = makeGenaiDaemon();
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', session_id: sid,
+    transcript_path: transcript.file, source: 'startup', cwd: '/x',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'SubagentStop', session_id: sid, agent_id: agentId,
+    agent_type: 'Explore', agent_transcript_path: subPath,
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', session_id: sid,
+    transcript_path: transcript.file, tool_use_id: 'agent-call',
+    tool_name: 'Agent', tool_input: { subagent_type: 'Explore', prompt: 'do it' },
+    tool_response: 'done',
+  });
+  await finish(daemon, sid);
+
+  const agents = exporter.getFinishedSpans().filter(span =>
+    span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
+    && span.attributes[ATTR.AGENT_NAME] === 'Explore');
+  assert.equal(agents.length, 1, 'one Agent span even across differing turns');
+  assert.equal(agents[0].attributes[ATTR.AGENT_ID], agentId);
+  assert.equal(agents[0].attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID], 'agent-call');
+});
