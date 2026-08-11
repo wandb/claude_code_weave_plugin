@@ -15,6 +15,7 @@ import {
 import type { DaemonConfig } from './config.js';
 import { loadSettings, VERSION } from './setup.js';
 import { HookHandler } from './hookHandler.js';
+import { ExportHealth } from './exportHealth.js';
 import { appendToLog } from './utils.js';
 
 /** Inbound control message sent directly to the socket (not a hook event). */
@@ -54,6 +55,8 @@ export class Daemon {
     Number(process.env.WEAVE_INACTIVITY_MS) || INACTIVITY_TIMEOUT_MS;
   private tracingEnabled = false;
   private readonly hookHandler: HookHandler;
+  /** Rejected exports, reported on `config-hash` so `status` can warn. */
+  private readonly exportHealth = new ExportHealth();
 
   constructor(
     private readonly socketPath: string,
@@ -212,11 +215,11 @@ export class Daemon {
     process.env['WF_TRACE_SERVER_URL'] = this.config.baseUrl;
     process.env['WANDB_API_KEY'] = this.config.apiKey;
 
-    const otelDiag = (message: string, ...args: unknown[]) =>
-      this.log(
-        'ERROR',
-        `otel: ${message}${args.length ? ` ${args.map(String).join(' ')}` : ''}`,
-      );
+    const otelDiag = (message: string, ...args: unknown[]) => {
+      const line = `otel: ${message}${args.length ? ` ${args.map(String).join(' ')}` : ''}`;
+      this.exportHealth.record(line);
+      this.log('ERROR', line);
+    };
     diag.setLogger(
       {
         verbose: otelDiag,
@@ -287,6 +290,7 @@ export class Daemon {
             pid: process.pid,
             version: VERSION,
             path: daemonEntryPath(),
+            last_export_error: this.exportHealth.snapshot(),
           }));
         } else {
           socket.end();
@@ -356,7 +360,9 @@ export class Daemon {
       try {
         await weave.flushOTel();
       } catch (err) {
-        this.log('ERROR', `Error flushing Weave SDK: ${err}`);
+        const line = `Error flushing Weave SDK: ${err}`;
+        this.exportHealth.record(line);
+        this.log('ERROR', line);
       }
     }
     this.hookHandler.closeTranscripts();

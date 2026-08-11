@@ -39,6 +39,7 @@ import {
   ApiKeySource,
 } from './config.js';
 import { DEFAULT_AGENT_NAME } from './genaiSpans.js';
+import type { ExportErrorSnapshot } from './exportHealth.js';
 
 // ---------------------------------------------------------------------------
 // Help
@@ -385,6 +386,8 @@ interface StatusReport {
    *  it predates identity reporting. Lets you confirm which build is actually
    *  running (e.g. a linked local dev build vs the published install). */
   daemon: { pid: number | null; version: string | null; path: string | null };
+  /** Last rejected export per the live daemon. Null also means unknown: no daemon, or one predating this field. */
+  last_export_error: ExportErrorSnapshot | null;
   ready_to_trace: boolean;
   view_traces_url: string | null;
 }
@@ -402,6 +405,21 @@ interface StatusSnapshot {
   api_key_source: ApiKeySource;
 }
 
+/** Narrow the daemon's untrusted `last_export_error` reply to the report shape. */
+function asExportError(value: unknown): ExportErrorSnapshot | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v['message'] !== 'string' || typeof v['at'] !== 'string' || typeof v['count'] !== 'number') {
+    return null;
+  }
+  return {
+    code: typeof v['code'] === 'string' ? v['code'] : null,
+    message: v['message'],
+    at: v['at'],
+    count: v['count'],
+  };
+}
+
 async function gatherStatus(): Promise<StatusSnapshot> {
   const report: StatusReport = {
     version: VERSION,
@@ -416,6 +434,7 @@ async function gatherStatus(): Promise<StatusSnapshot> {
     log_file: { path: null, size_bytes: null },
     config_drift: false,
     daemon: { pid: null, version: null, path: null },
+    last_export_error: null,
     ready_to_trace: false,
     view_traces_url: null,
   };
@@ -482,6 +501,7 @@ async function gatherStatus(): Promise<StatusSnapshot> {
       if (typeof parsed['pid'] === 'number') report.daemon.pid = parsed['pid'];
       if (typeof parsed['version'] === 'string') report.daemon.version = parsed['version'];
       if (typeof parsed['path'] === 'string') report.daemon.path = parsed['path'];
+      report.last_export_error = asExportError(parsed['last_export_error']);
     } catch {
       // Daemon did not reply; cannot determine drift or identity.
     }
@@ -520,6 +540,13 @@ function humanSize(bytes: number): string {
 function statusRow(glyph: string, label: string, value: string, hint?: string): void {
   console.log(`  ${glyph} ${label.padEnd(STATUS_LABEL_WIDTH)} ${value}`);
   if (hint) console.log(`    ${' '.repeat(STATUS_LABEL_WIDTH)} → ${hint}`);
+}
+
+/** Likely cause for the auth codes we can attribute; nothing for the rest. */
+function exportHint(code: string | null, project: string | null): string | undefined {
+  if (code === '401') return 'key rejected, verify wandb_api_key';
+  if (code === '403') return `no write access to ${project ?? 'the configured project'} with this key`;
+  return undefined;
 }
 
 function printPrettyStatus(snap: StatusSnapshot): void {
@@ -599,6 +626,12 @@ function printPrettyStatus(snap: StatusSnapshot): void {
     }
     if (report.config_drift) {
       statusRow('⚠', 'Config', 'daemon on an older config', 'weave-claude-code restart');
+    }
+    // Hooks keep being captured while exports are rejected, so nothing else shows the drop.
+    if (report.last_export_error) {
+      const { code, message, count, at } = report.last_export_error;
+      const label = code ? `${code} ${message}` : message;
+      statusRow('⚠', 'Export', `${label} (${count}x, last ${at.slice(11, 19)})`, exportHint(code, report.weave_project));
     }
   }
   if (report.log_file.size_bytes !== null) {
