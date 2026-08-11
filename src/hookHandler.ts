@@ -27,6 +27,7 @@ import {
   beginCall,
   bindAgent,
   denyCall,
+  isDuplicateToolUse,
   matchAgent,
   recordAgentStop,
   recordCallOutcome,
@@ -419,6 +420,9 @@ export class HookHandler {
     if (!descriptor) return;
     const session = await this.getOrReconstructSession(sessionId, input);
     if (!session) return;
+    // Before resolving a parent: that would mint a turn for a call beginCall is
+    // about to reject, leaving an empty turn behind.
+    if (isDuplicateToolUse(session.calls, descriptor.toolUseId)) return;
 
     const parent = await this.resolveCallParent(session, input);
     if (!parent) {

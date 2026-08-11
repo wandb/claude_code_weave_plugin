@@ -108,6 +108,13 @@ function attachCall(state: CallState, call: TracedCall): void {
   if (call.kind === 'agent' && call.agentId) state.byAgentId.set(call.agentId, call);
 }
 
+/** True once a tool_use_id is in flight or finished, so a repeat must not reopen
+ *  it. Callers should consult this before resolving a parent: creating the turn
+ *  first would leave an empty one behind when the call is then rejected. */
+export function isDuplicateToolUse(state: CallState, toolUseId: string): boolean {
+  return state.byToolUseId.has(toolUseId) || state.toolUseTombstones.has(toolUseId);
+}
+
 /** Open the span represented by PreToolUse. Agent is the only special tool:
  * its invoke-agent span becomes the parent of later child hooks. */
 export function beginCall(
@@ -117,8 +124,7 @@ export function beginCall(
 ): TracedCall | undefined {
   if (parent.kind === 'agent'
     && (parent.completion || (parent.stopSeen && parent.outcome))) return undefined;
-  if (state.byToolUseId.has(args.toolUseId)
-    || state.toolUseTombstones.has(args.toolUseId)) return undefined;
+  if (isDuplicateToolUse(state, args.toolUseId)) return undefined;
 
   const root = parent.kind === 'turn' ? parent : parent.root;
   let call: TracedCall;

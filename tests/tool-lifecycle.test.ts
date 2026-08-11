@@ -523,3 +523,45 @@ function chatsById(spans: ReadableSpan[]): unknown[] {
     .filter(span => span.attributes[ATTR.OPERATION_NAME] === 'chat')
     .map(span => span.attributes[ATTR.RESPONSE_ID]);
 }
+
+test('a late duplicate PreToolUse for a finished tool does not mint an empty turn', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sessionId = 'duplicate-pre-tool-use';
+  const transcript = makeTranscript(t, sessionId, 'prompt one');
+  const daemon = makeGenaiDaemon();
+  const base = { session_id: sessionId, transcript_path: transcript.file };
+  const tool = { ...base, tool_use_id: 'toolu-1', tool_name: 'Bash', tool_input: { command: 'ls' } };
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', ...base, source: 'startup', cwd: '/x',
+  });
+  await daemon.routeEvent({
+    hook_event_name: 'UserPromptSubmit', ...base, prompt: 'prompt one', prompt_id: 'p1',
+  });
+  await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...tool, prompt_id: 'p1' });
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', ...tool, prompt_id: 'p1', tool_response: 'ok',
+  });
+  transcript.appendResponse('msg-a', 'done one');
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...base, prompt_id: 'p1' });
+
+  transcript.appendPrompt('prompt two');
+  await daemon.routeEvent({
+    hook_event_name: 'UserPromptSubmit', ...base, prompt: 'prompt two', prompt_id: 'p2',
+  });
+  transcript.appendResponse('msg-b', 'done two');
+  await daemon.routeEvent({ hook_event_name: 'Stop', ...base, prompt_id: 'p2' });
+
+  // Out of order: the tool_use_id is already tombstoned.
+  await daemon.routeEvent({ hook_event_name: 'PreToolUse', ...tool, prompt_id: 'p1' });
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+  await flushWeave();
+
+  const spans = exporter.getFinishedSpans();
+  assert.equal(toolSpans(spans).length, 1, 'the duplicate must not reopen the tool span');
+  assert.equal(turnSpans(spans).length, 2, 'two prompts, two turns, no empty third');
+  for (const turn of turnSpans(spans)) {
+    assert.ok(turn.attributes[ATTR.INPUT_MESSAGES], 'every turn records its prompt');
+  }
+});
