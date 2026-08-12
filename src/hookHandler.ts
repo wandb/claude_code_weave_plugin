@@ -14,6 +14,7 @@ import type {
   PreCompactHookInput,
   SessionEndHookInput,
   SessionStartHookInput,
+  StopFailureHookInput,
   StopHookInput,
   SubagentStartHookInput,
   SubagentStopHookInput,
@@ -244,6 +245,9 @@ export class HookHandler {
         return;
       case 'Stop':
         await this.handleStop(sessionId, input);
+        return;
+      case 'StopFailure':
+        await this.handleStopFailure(sessionId, input);
         return;
       case 'SessionEnd':
         await this.handleSessionEnd(sessionId, input);
@@ -875,6 +879,24 @@ export class HookHandler {
       `Stop: session=${sessionId} transcript_path=${session.transcriptPath} responses=${snapshot.responseCount} model=${snapshot.model ?? 'unknown'} last_assistant_message_present=${Boolean(input.last_assistant_message)}`,
     );
     this.log('INFO', 'Recorded turn stop snapshot');
+  }
+
+  private async handleStopFailure(
+    sessionId: string,
+    input: StopFailureHookInput,
+  ): Promise<void> {
+    const session = await this.getOrReconstructSession(sessionId, input);
+    if (!session) return;
+
+    const snapshot = await session.failTurn(input.prompt_id, {
+      errorType: input.error,
+      details: input.error_details,
+      lastAssistantMessage: input.last_assistant_message,
+    });
+    this.log(
+      'INFO',
+      `Recorded turn failure: ${input.error} (responses=${snapshot.responseCount})`,
+    );
   }
 
   private async handleSessionEnd(
