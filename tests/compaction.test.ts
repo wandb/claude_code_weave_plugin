@@ -85,3 +85,14 @@ test('a PostCompact before any turn attaches to the next one', async (t) => {
     turns.map(s => s.attributes[ATTR.COMPACTION_SUMMARY]));
   assert.equal(turns[0]?.attributes[ATTR.COMPACTION_SUMMARY], SUMMARY);
 });
+
+test('the plugin forwards PostCompact hooks to the daemon', () => {
+  const manifest = JSON.parse(
+    fs.readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'),
+  ) as { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> };
+  const commands = manifest.hooks?.['PostCompact']
+    ?.flatMap(group => group.hooks ?? [])
+    .map(hook => hook.command);
+
+  assert.ok(commands?.some(command => command?.includes('/hooks/hook-handler.sh')));
+});
