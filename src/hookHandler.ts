@@ -11,6 +11,7 @@ import type {
   PermissionDeniedHookInput,
   PermissionRequestHookInput,
   PreToolUseHookInput,
+  PostCompactHookInput,
   PreCompactHookInput,
   SessionEndHookInput,
   SessionStartHookInput,
@@ -244,6 +245,9 @@ export class HookHandler {
       case 'PreCompact':
         this.handlePreCompact(sessionId, input);
         return;
+      case 'PostCompact':
+        this.handlePostCompact(sessionId, input);
+        return;
       case 'Stop':
         await this.handleStop(sessionId, input);
         return;
@@ -396,21 +400,35 @@ export class HookHandler {
   }
 
   private handlePreCompact(sessionId: string, input: PreCompactHookInput): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-
     // Claude Code sends compaction fields that are absent from the SDK type.
     const raw = input as Record<string, unknown>;
-    const attrs: CompactionAttrs = {
+    this.attachCompaction(sessionId, input.prompt_id, 'PreCompact', {
       summary: (raw['summary'] ?? raw['compaction_summary']) as string | undefined,
       itemsBefore: raw['items_before'] as number | undefined,
       itemsAfter: raw['items_after'] as number | undefined,
-    };
-    if (session.setCompaction(input.prompt_id, attrs)) {
-      this.log('INFO', `PreCompact attached to active turn (session ${sessionId})`);
-    } else {
-      this.log('INFO', `PreCompact buffered; will attach to next turn (session ${sessionId})`);
-    }
+    });
+  }
+
+  private handlePostCompact(sessionId: string, input: PostCompactHookInput): void {
+    this.attachCompaction(sessionId, input.prompt_id, 'PostCompact', {
+      summary: input.compact_summary,
+    });
+  }
+
+  private attachCompaction(
+    sessionId: string,
+    promptId: string | undefined,
+    event: string,
+    attrs: CompactionAttrs,
+  ): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || attrs.summary === undefined
+      && attrs.itemsBefore === undefined && attrs.itemsAfter === undefined) return;
+
+    const placement = session.setCompaction(promptId, attrs)
+      ? 'attached to active turn'
+      : 'buffered; will attach to next turn';
+    this.log('INFO', `${event} ${placement} (session ${sessionId})`);
   }
 
   private async handlePreToolUse(

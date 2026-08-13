@@ -79,6 +79,12 @@
         "hooks": [{"type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/hook-handler.sh", "timeout": 10}]
       }
     ],
+    "PostCompact": [
+      {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/hook-handler.sh", "timeout": 10}]
+      }
+    ],
     "InstructionsLoaded": [
       {
         "matcher": "*",
