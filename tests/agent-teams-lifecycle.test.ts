@@ -206,7 +206,7 @@ test('a tentative named Agent failure still accepts its ordinary Stop transcript
   const agents = exporter.getFinishedSpans().filter(span =>
     span.attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID] === 'ordinary-failed-call');
   assert.equal(agents.length, 1);
-  assert.equal(agents[0].attributes[ATTR.ERROR_TYPE], 'AgentError');
+  assert.equal(agents[0].attributes[ATTR.WEAVE_FAILURE_TYPE], 'AgentError');
   assert.equal(agents[0].attributes[ATTR.WEAVE_ORPHAN_REASON], undefined);
   assert.ok(exporter.getFinishedSpans().some(span =>
     span.attributes[ATTR.RESPONSE_ID] === 'ordinary-failed-msg'));
@@ -473,6 +473,6 @@ test('PermissionDenied closes an explicit Team and its deferred root once', asyn
     span.attributes[ATTR.AGENT_NAME] === 'claude-code');
   assert.equal(agents.length, 1);
   assert.equal(roots.length, 1);
-  assert.equal(agents[0].attributes[ATTR.ERROR_TYPE], 'permission_denied');
+  assert.equal(agents[0].attributes[ATTR.WEAVE_FAILURE_TYPE], 'permission_denied');
   assert.equal(spans.some(span => isTeammateTurn(span)), false);
 });

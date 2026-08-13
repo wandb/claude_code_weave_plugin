@@ -202,13 +202,13 @@ export class Session {
 
   async failTurn(
     promptId: string | undefined,
-    failure: { errorType: string; details?: string; lastAssistantMessage?: string },
+    failure: { failureType: string; details?: string; lastAssistantMessage?: string },
   ): Promise<{ responseCount: number }> {
     const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
     const turn = this.turnForPrompt(promptId);
     if (turn) {
-      turn.span.setAttributes({ [ATTR.ERROR_TYPE]: failure.errorType });
-      turn.failure = new Error(failure.details ?? failure.errorType);
+      turn.span.setAttributes({ [ATTR.WEAVE_FAILURE_TYPE]: failure.failureType });
+      turn.failure = new Error(failure.details ?? failure.failureType);
     }
     return { responseCount: snapshot.responseCount };
   }

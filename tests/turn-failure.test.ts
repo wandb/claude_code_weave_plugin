@@ -45,8 +45,8 @@ test('StopFailure marks the turn as failed', async (t) => {
   const [turn] = exporter.getFinishedSpans()
     .filter(s => s.attributes[ATTR.OPERATION_NAME] === 'invoke_agent');
   assert.ok(turn, 'the turn exists');
-  console.log('  status:', turn.status, 'error.type:', turn.attributes[ATTR.ERROR_TYPE]);
-  assert.equal(turn.attributes[ATTR.ERROR_TYPE], 'rate_limit', 'the failure reason is recorded');
+  assert.equal(turn.attributes[ATTR.WEAVE_FAILURE_TYPE], 'rate_limit');
+  assert.equal(turn.events.at(-1)?.attributes?.['exception.type'], 'Error');
   assert.equal(turn.status.code, 2, 'the span is marked ERROR');
 });
 
