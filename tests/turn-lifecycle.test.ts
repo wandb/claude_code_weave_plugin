@@ -438,3 +438,48 @@ test('a prompt arriving before Claude Code creates the transcript still opens a 
   );
   assert.equal(chats(spans).length, 1, 'its response is still recorded');
 });
+
+test('a delayed prompt-less tool result attaches to its own turn, not the newest', async (t) => {
+  const exporter = await initWeaveInMemory();
+  exporter.reset();
+  const sessionId = 'delayed-legacy-tool';
+  const transcript = makeTranscript(t, sessionId);
+  // Older transcript turn: the prompt and the response that called the tool.
+  transcript.append(userEntry('old prompt'));
+  transcript.append({
+    type: 'assistant',
+    message: {
+      role: 'assistant', id: 'msg-old', model: 'claude-opus-4-8',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      content: [{ type: 'tool_use', id: 'old-tool', name: 'Bash', input: { command: 'ls' } }],
+    },
+  });
+  transcript.append(userEntry('new prompt'));
+  const daemon = makeGenaiDaemon();
+  const base = { session_id: sessionId, transcript_path: transcript.file };
+
+  await daemon.routeEvent({
+    hook_event_name: 'SessionStart', ...base, source: 'startup', cwd: '/x',
+  });
+  // Legacy hooks carry no prompt_id, so the newer prompt becomes the current turn.
+  await daemon.routeEvent({ hook_event_name: 'UserPromptSubmit', ...base, prompt: 'new prompt' });
+  // Delayed terminal hook for the older tool, still without a prompt_id.
+  await daemon.routeEvent({
+    hook_event_name: 'PostToolUse', ...base, tool_use_id: 'old-tool',
+    tool_name: 'Bash', tool_input: { command: 'ls' }, tool_response: 'ok',
+  });
+  await daemon.routeEvent({ hook_event_name: 'SessionEnd', ...base, reason: 'clear' });
+  await flushWeave();
+
+  const spans = exporter.getFinishedSpans();
+  const [toolSpan] = spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'execute_tool');
+  assert.ok(toolSpan);
+  const parent = turns(spans).find(span => span.spanContext().spanId === spanParentId(toolSpan));
+  assert.ok(parent, 'the tool hangs off a turn');
+  assert.equal(
+    parent.attributes[ATTR.INPUT_MESSAGES],
+    JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: 'old prompt' }] }]),
+    'the old tool belongs to the turn that called it',
+  );
+  assert.equal(turns(spans).length, 2, 'the newer turn stays separate');
+});

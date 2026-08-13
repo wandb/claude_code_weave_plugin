@@ -347,10 +347,19 @@ export class Session {
   }
 
   ensureToolTurn(promptId: string | undefined, toolUseId: string): TurnTrace {
-    const existing = this.turnForPrompt(promptId);
-    if (existing) return existing;
+    const exact = promptId === undefined ? undefined : this.turnForPrompt(promptId);
+    if (exact) return exact;
 
     const cursor = this.toolTurnCursor(toolUseId);
+    if (promptId === undefined) {
+      // Being the current turn is not evidence of owning this tool: a delayed
+      // hook for an older tool would otherwise land on a newer prompt. Reuse an
+      // open turn only when it is the transcript turn holding this tool_use_id.
+      const holder = cursor
+        ? [...this.turns].find(turn => turn.responseOffset === cursor.responseOffset)
+        : this.currentTurn;
+      if (holder) return holder;
+    }
     if (!cursor) return this.ensureTurn(promptId);
     return this.startTurn({
       promptId,
