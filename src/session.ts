@@ -50,6 +50,8 @@ export type TurnTrace = {
   responseLimit?: number;
   /** Supports repeated/blockable Stop hooks without duplicate chat spans. */
   seenResponses: Set<string>;
+  /** Set by StopFailure so whichever path closes the turn marks it ERROR. */
+  failure?: Error;
 };
 
 type NewSessionOptions = {
@@ -196,6 +198,18 @@ export class Session {
       responseCount: responses.length,
       model: responses.filter(response => response.model).at(-1)?.model,
     };
+  }
+
+  async failTurn(
+    promptId: string | undefined,
+    failure: { reason: string; details?: string; lastAssistantMessage?: string },
+  ): Promise<{ responseCount: number }> {
+    const snapshot = await this.snapshotStop(promptId, failure.lastAssistantMessage);
+    const turn = this.turnForPrompt(promptId);
+    if (turn) {
+      turn.failure = new Error(failure.details ?? failure.reason);
+    }
+    return { responseCount: snapshot.responseCount };
   }
 
   finishAtSessionEnd(
@@ -492,7 +506,10 @@ export class Session {
   }
 
   private endTurn(turn: TurnTrace, endTime?: Date): void {
-    turn.span.end(endTime ? { endTime } : undefined);
+    turn.span.end({
+      ...(endTime ? { endTime } : {}),
+      ...(turn.failure ? { error: turn.failure } : {}),
+    });
     this.turns.delete(turn);
     if (this.currentTurn === turn) this.currentTurn = undefined;
   }
