@@ -91,6 +91,15 @@ test('same-name respawns consume distinct transcripts and duplicate idle is idem
       .sort(),
     ['team-msg-1', 'team-msg-2'],
   );
+  assert.deepEqual(
+    spans.filter(span => isTeammateTurn(span))
+      .map(span => span.attributes[ATTR.OUTPUT_MESSAGES])
+      .sort(),
+    [
+      JSON.stringify([{ role: 'assistant', content: 'first result' }]),
+      JSON.stringify([{ role: 'assistant', content: 'second result' }]),
+    ],
+  );
 });
 
 test('same-session agent-setting lifecycle waits for TeammateIdle', async (t) => {
