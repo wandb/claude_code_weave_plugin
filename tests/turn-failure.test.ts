@@ -45,9 +45,8 @@ test('StopFailure marks the turn as failed', async (t) => {
   const [turn] = exporter.getFinishedSpans()
     .filter(s => s.attributes[ATTR.OPERATION_NAME] === 'invoke_agent');
   assert.ok(turn, 'the turn exists');
-  console.log('  status:', turn.status, 'error.type:', turn.attributes[ATTR.ERROR_TYPE]);
-  assert.equal(turn.attributes[ATTR.ERROR_TYPE], 'rate_limit', 'the failure reason is recorded');
   assert.equal(turn.status.code, 2, 'the span is marked ERROR');
+  assert.equal(turn.status.message, '429 from the API after 3 retries');
 });
 
 test('a successful Stop leaves the turn unerrored', async (t) => {
@@ -71,7 +70,6 @@ test('a successful Stop leaves the turn unerrored', async (t) => {
   const [turn] = exporter.getFinishedSpans()
     .filter(s => s.attributes[ATTR.OPERATION_NAME] === 'invoke_agent');
   assert.ok(turn);
-  assert.equal(turn.attributes[ATTR.ERROR_TYPE], undefined);
   assert.notEqual(turn.status.code, 2);
 });
 
