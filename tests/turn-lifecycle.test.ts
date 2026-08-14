@@ -128,6 +128,13 @@ test('Stop snapshots only new normalized responses and SessionEnd closes the roo
   ]);
   assert.ok(responseSpans.every(span => spanParentId(span) === turn.spanContext().spanId));
   assert.equal(turn.attributes[ATTR.WEAVE_ORPHAN_REASON], undefined);
+  assert.equal(
+    turn.attributes[ATTR.OUTPUT_MESSAGES],
+    JSON.stringify([
+      { role: 'assistant', content: 'working' },
+      { role: 'assistant', content: 'done' },
+    ]),
+  );
   assert.deepEqual(turn.attributes[ATTR.RESPONSE_FINISH_REASONS], ['end_turn']);
   assert.equal(turn.attributes[ATTR.WEAVE_INTEGRATION_NAME], 'weave-claude-code');
   assert.equal(turn.attributes[ATTR.WEAVE_INTEGRATION_VERSION], VERSION);
