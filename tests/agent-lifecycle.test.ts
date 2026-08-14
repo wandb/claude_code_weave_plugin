@@ -245,7 +245,7 @@ test('Agent failure before SubagentStop closes the original marker once', async 
   const agents = spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
     && span.attributes[ATTR.AGENT_NAME] === 'Explore');
   assert.equal(agents.length, 1);
-  assert.equal(agents[0].attributes[ATTR.WEAVE_FAILURE_TYPE], 'AgentError');
+  assert.equal(agents[0].attributes[ATTR.ERROR_TYPE], 'AgentError');
   assert.equal(
     agents[0].attributes[ATTR.OUTPUT_MESSAGES],
     JSON.stringify([{ role: 'assistant', content: 'AgentError: failed' }]),

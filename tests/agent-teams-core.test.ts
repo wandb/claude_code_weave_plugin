@@ -282,7 +282,7 @@ test('a failed team spawn closes its deferred owner', async (t) => {
   const agent = spans.find(span =>
     span.attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID] === 'failed-team-call');
   assert.ok(agent);
-  assert.equal(agent.attributes[ATTR.WEAVE_FAILURE_TYPE], 'SpawnError');
+  assert.equal(agent.attributes[ATTR.ERROR_TYPE], 'SpawnError');
   assert.equal(agent.attributes[ATTR.WEAVE_ORPHAN_REASON], undefined);
   assert.ok(spans.some(span => span.attributes[ATTR.AGENT_NAME] === 'claude-code'));
 });

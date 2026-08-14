@@ -51,7 +51,6 @@ export const ATTR = {
   WEAVE_SOURCE: 'weave.claude_code.source',
   WEAVE_PLUGIN_VERSION: 'weave.claude_code.plugin.version',
   WEAVE_ORPHAN_REASON: 'weave.claude_code.orphan_reason',
-  WEAVE_FAILURE_TYPE: 'weave.claude_code.failure.type',
 
   // Integration identity: unlike gen_ai.agent.name, not user-overridable and
   // never changes per subagent. Set on the conversation; propagated to every span.

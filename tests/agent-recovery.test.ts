@@ -133,14 +133,13 @@ test('prefix-colliding restart prompts remain separate partial Agent markers', a
   const spans = exporter.getFinishedSpans();
   const agents = spans.filter(span => span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
     && span.attributes[ATTR.AGENT_NAME] === 'Explore');
-  const failed = agents.find(span =>
-    span.attributes[ATTR.WEAVE_FAILURE_TYPE] === 'AgentError');
+  const failed = agents.find(span => span.attributes[ATTR.ERROR_TYPE] === 'AgentError');
   const recovered = agents.find(span => span.attributes[ATTR.AGENT_ID] === agentId);
   const chat = spans.find(span => span.attributes[ATTR.RESPONSE_ID] === 'prefix-msg');
   assert.equal(agents.length, 2);
   assert.ok(failed && recovered && chat);
   assert.equal(failed.attributes[ATTR.AGENT_ID], undefined);
-  assert.equal(recovered.attributes[ATTR.WEAVE_FAILURE_TYPE], undefined);
+  assert.equal(recovered.attributes[ATTR.ERROR_TYPE], undefined);
   assert.equal(spanParentId(chat), recovered.spanContext().spanId);
 });
 

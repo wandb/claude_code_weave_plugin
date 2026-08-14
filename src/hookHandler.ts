@@ -889,7 +889,7 @@ export class HookHandler {
     if (!session) return;
 
     const snapshot = await session.failTurn(input.prompt_id, {
-      failureType: input.error,
+      errorType: input.error,
       details: input.error_details,
       lastAssistantMessage: input.last_assistant_message,
     });

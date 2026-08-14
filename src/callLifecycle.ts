@@ -308,7 +308,7 @@ export function denyCall(state: CallState, toolUseId: string, reason: string): v
   resolvePermission(call, false);
   if (call.kind === 'tool') {
     call.span.result = reason;
-    call.span.setAttributes({ [ATTR.WEAVE_FAILURE_TYPE]: 'permission_denied' });
+    call.span.setAttributes({ [ATTR.ERROR_TYPE]: 'permission_denied' });
     call.span.end({ error: new Error(reason) });
     completeCall(state, call);
   } else {
@@ -365,7 +365,7 @@ function finishToolCall(call: TracedTool, outcome: ToolResult): void {
   }
   const error = outcome.error;
   call.span.result = error;
-  call.span.setAttributes({ [ATTR.WEAVE_FAILURE_TYPE]: failureTypeFromMessage(error) });
+  call.span.setAttributes({ [ATTR.ERROR_TYPE]: errorType(error) });
   call.span.end({ error: new Error(error) });
 }
 
@@ -384,9 +384,7 @@ function finishAgentSpan(
     call.span.end(endTime ? { endTime } : undefined);
     return;
   }
-  call.span.setAttributes({
-    [ATTR.WEAVE_FAILURE_TYPE]: failureType ?? failureTypeFromMessage(outcome.error),
-  });
+  call.span.setAttributes({ [ATTR.ERROR_TYPE]: failureType ?? errorType(outcome.error) });
   call.span.end({
     error: new Error(outcome.error),
     ...(endTime ? { endTime } : {}),
@@ -410,7 +408,7 @@ function endAgent(call: TracedAgent, completion: AgentCompletion): void {
   });
 }
 
-function failureTypeFromMessage(error: string): string {
+function errorType(error: string): string {
   return error.trim().match(/^[A-Z][A-Za-z_]*Error/)?.[0] ?? 'tool_error';
 }
 

@@ -87,7 +87,7 @@ test('tool failure is independent from permission approval', async (t) => {
     span.attributes['gen_ai.tool.call.id'] === 'failed-tool');
   assert.ok(tool);
   assert.equal(resolvedPermission(tool)?.attributes[ATTR.EVT_PERMISSION_APPROVED], true);
-  assert.equal(tool.attributes[ATTR.WEAVE_FAILURE_TYPE], 'CommandError');
+  assert.equal(tool.attributes[ATTR.ERROR_TYPE], 'CommandError');
 });
 
 test('auto-mode PermissionDenied resolves the exact tool_use_id', async (t) => {
@@ -115,7 +115,7 @@ test('auto-mode PermissionDenied resolves the exact tool_use_id', async (t) => {
   assert.ok(denied && allowed);
   assert.equal(denied.events.some(event => event.name === ATTR.EVT_PERMISSION_REQUEST), false);
   assert.equal(resolvedPermission(denied)?.attributes[ATTR.EVT_PERMISSION_APPROVED], false);
-  assert.equal(denied.attributes[ATTR.WEAVE_FAILURE_TYPE], 'permission_denied');
+  assert.equal(denied.attributes[ATTR.ERROR_TYPE], 'permission_denied');
   assert.equal(resolvedPermission(allowed), undefined);
 });
 
@@ -197,7 +197,7 @@ test('restart recovers an Agent denied before it could start', async (t) => {
   const agents = exporter.getFinishedSpans().filter(span =>
     span.attributes[ATTR.AGENT_NAME] === 'Explore');
   assert.equal(agents.length, 1);
-  assert.equal(agents[0].attributes[ATTR.WEAVE_FAILURE_TYPE], 'permission_denied');
+  assert.equal(agents[0].attributes[ATTR.ERROR_TYPE], 'permission_denied');
   assert.equal(resolvedPermission(agents[0])?.attributes[ATTR.EVT_PERMISSION_APPROVED], false);
 });
 
@@ -246,7 +246,7 @@ test('restart-first nested PermissionDenied recovers its owner and stays fail-cl
     span.attributes[ATTR.WEAVE_SUBAGENT_SPAWNING_TOOL_CALL_ID] === 'denied-child-agent');
   assert.ok(owner && denied);
   assert.equal(spanParentId(denied), owner.spanContext().spanId);
-  assert.equal(denied.attributes[ATTR.WEAVE_FAILURE_TYPE], 'permission_denied');
+  assert.equal(denied.attributes[ATTR.ERROR_TYPE], 'permission_denied');
   assert.equal(denied.events.some(event => event.name === ATTR.EVT_PERMISSION_REQUEST), false);
   assert.equal(resolvedPermission(denied)?.attributes[ATTR.EVT_PERMISSION_APPROVED], false);
   assert.equal(spans.some(span =>
@@ -286,9 +286,8 @@ test('PermissionDenied stays distinct from a recovered same-type Agent', async (
     span.attributes[ATTR.OPERATION_NAME] === 'invoke_agent'
     && span.attributes[ATTR.AGENT_NAME] === 'Explore');
   const recovered = agents.find(span => span.attributes[ATTR.AGENT_ID] === recoveredId);
-  const denied = agents.find(span =>
-    span.attributes[ATTR.WEAVE_FAILURE_TYPE] === 'permission_denied');
+  const denied = agents.find(span => span.attributes[ATTR.ERROR_TYPE] === 'permission_denied');
   assert.equal(agents.length, 2);
   assert.ok(recovered && denied);
-  assert.equal(recovered.attributes[ATTR.WEAVE_FAILURE_TYPE], undefined);
+  assert.equal(recovered.attributes[ATTR.ERROR_TYPE], undefined);
 });

@@ -109,7 +109,7 @@ test('ordinary tool calls are traced once', async (t) => {
   assert.equal(spanParentId(tools[0]), turn.spanContext().spanId);
 });
 
-test('PostToolUseFailure records the tool result and failure type', async (t) => {
+test('PostToolUseFailure records the tool result and error type', async (t) => {
   const exporter = await initWeaveInMemory();
   exporter.reset();
   const sessionId = 'failed-tool';
@@ -137,7 +137,7 @@ test('PostToolUseFailure records the tool result and failure type', async (t) =>
   const [span] = toolSpans(exporter.getFinishedSpans());
   assert.ok(span);
   assert.equal(span.attributes['gen_ai.tool.call.result'], 'CommandError: exit 1');
-  assert.equal(span.attributes[ATTR.WEAVE_FAILURE_TYPE], 'CommandError');
+  assert.equal(span.attributes[ATTR.ERROR_TYPE], 'CommandError');
   assert.equal(span.status.code, 2);
 });
 

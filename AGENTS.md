@@ -20,10 +20,6 @@ Each of these looks like a bug and is not. Check here before filing one.
 - **`status_code: UNSET` on a successful span is correct.** OTel reserves `Ok`
   for explicit developer intent; UNSET is the success default. Failures already
   route through `span.end({ error })`, which sets ERROR plus `error.type`.
-- **Claude failure classifications are not `error.type`.** The Weave SDK owns
-  that OTel field and derives it from the `Error`. Values such as `rate_limit`,
-  `CommandError`, and `permission_denied` use
-  `weave.claude_code.failure.type`.
 
 ## Verifying traces
 
