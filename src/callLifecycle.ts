@@ -152,7 +152,7 @@ export function beginCall(
   } else {
     const span = parent.span.startTool({
       name: args.name,
-      args: jsonStr(args.input),
+      args: args.input,
       toolCallId: args.toolUseId,
     });
     if (parent.kind === 'agent') {
@@ -307,9 +307,11 @@ export function denyCall(state: CallState, toolUseId: string, reason: string): v
 
   resolvePermission(call, false);
   if (call.kind === 'tool') {
-    call.span.result = reason;
-    call.span.setAttributes({ [ATTR.ERROR_TYPE]: 'permission_denied' });
-    call.span.end({ error: new Error(reason) });
+    call.span.end({
+      result: reason,
+      error: new Error(reason),
+      errorType: 'permission_denied',
+    });
     completeCall(state, call);
   } else {
     finishAgentCall(state, call, {
@@ -359,14 +361,16 @@ export function finishAgentCall(
 function finishToolCall(call: TracedTool, outcome: ToolResult): void {
   resolvePermission(call, true);
   if (outcome.ok) {
-    call.span.result = jsonStr(outcome.output);
-    call.span.end();
+    // `null` would serialize to the string "null"; keep the historical empty.
+    call.span.end({ result: outcome.output ?? '' });
     return;
   }
   const error = outcome.error;
-  call.span.result = error;
-  call.span.setAttributes({ [ATTR.ERROR_TYPE]: errorType(error) });
-  call.span.end({ error: new Error(error) });
+  call.span.end({
+    result: error,
+    error: new Error(error),
+    errorType: errorType(error),
+  });
 }
 
 function finishAgentSpan(
